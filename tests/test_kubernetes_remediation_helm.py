@@ -29,9 +29,11 @@ def test_values_drop_restricted_tools_and_map_approval():
 def test_values_defaults_are_plug_and_play():
     v = _values()
     assert v["enabled"] is False  # opt-in
-    # 1.2.0 carries the diagnostic-pod target policy (ROB-910); the config keys
-    # asserted below only take effect on that version or newer.
-    assert v["image"] == "kubernetes-remediation-mcp:1.2.0"
+    # 1.2.0 carries the diagnostic-pod target policy (ROB-910), 1.3.0 the GPU
+    # node diagnostics tool (dcgmEnabled), 1.4.0 the `ps` argument policy
+    # (ROB-974) and the fail-closed file-read policy (ROB-973); the config keys
+    # asserted below only take effect on the version that introduced them.
+    assert v["image"] == "kubernetes-remediation-mcp:1.4.0"
     assert v["serviceAccount"]["clusterRole"] == ""  # chart creates scoped role
     assert v["networkPolicy"]["enabled"] is True
     assert v["config"]["allowArbitraryKubectlCommands"] is True
