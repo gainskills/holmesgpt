@@ -176,3 +176,4 @@ config_toolsets.yaml
 .claude-trace/
 eval_results.json
 uv.lock
+*values-local*.yaml

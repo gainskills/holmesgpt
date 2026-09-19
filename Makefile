@@ -18,3 +18,10 @@ docs-build:
 
 docs-strict:
 	poetry run mkdocs serve --dev-addr=127.0.0.1:7000 --strict
+
+dev-build:
+	docker build -t robustadev/holmes:dev .
+	docker build -f Dockerfile.operator -t robustadev/holmes-operator:dev .
+
+dev-reload:
+	./scripts/dev-reload.sh
