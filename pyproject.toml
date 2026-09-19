@@ -40,10 +40,10 @@ backoff = "^2.2.1"
 # and released (expected in litellm 1.90+).
 # litellm >= 1.84.0 also fixes CRITICAL CVE-2026-49468 (auth bypass via Host header
 # injection) and relaxes the pinned aiohttp to >=3.10,<4.0, letting us take aiohttp 3.14.1.
-litellm = "1.100.0"
+litellm = "^1.101.0"
 sentry-sdk = {extras = ["fastapi"], version = "^2.20.0"}
 confluent-kafka = "^2.6.1"
-kubernetes = "^32.0.1"
+kubernetes = "^36.0.3"
 # mcp >= 1.27.2 fixes CVE-2026-52869 and CVE-2026-52870 (both High); >= 1.28.1
 # additionally fixes CVE-2026-59950 (High).
 mcp = "1.28.1"
