@@ -14,7 +14,12 @@ from urllib.parse import parse_qs, urlencode, urlparse
 import httpx
 import pytest
 from mcp.client.session import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+try:
+    from mcp.client.streamable_http import streamable_http_client
+    streamablehttp_client = streamable_http_client
+except ImportError:
+    from mcp.client.streamable_http import streamablehttp_client  # type: ignore[no-redef]
+    streamable_http_client = streamablehttp_client  # type: ignore[assignment]
 from pydantic import ConfigDict
 
 from holmes.core.tools import (
@@ -1292,7 +1297,8 @@ class TestLiveAtlassianOAuthDiscovery:
         # Step 7: Use token to list MCP tools
         async def list_tools():
             headers = {"Authorization": f"Bearer {token_data['access_token']}"}
-            async with streamablehttp_client(self.ATLASSIAN_MCP_URL, headers=headers) as (read, write, _):
+            async with streamable_http_client(self.ATLASSIAN_MCP_URL, headers=headers) as streams:
+                read, write = streams[0], streams[1]
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     tools = await session.list_tools()

@@ -8,9 +8,9 @@ must use vision to read the code from the image.
 import base64
 import os
 
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.mcpserver import MCPServer, Image
 
-mcp = FastMCP("Mock Confluence Wiki")
+mcp = MCPServer("Mock Confluence Wiki")
 
 # Load the test image at module level (before_test sets cwd to fixture dir)
 _FIXTURE_DIR = os.path.dirname(os.path.abspath(__file__))

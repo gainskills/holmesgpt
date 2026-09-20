@@ -26,7 +26,7 @@ Self-contained so the eval needs no cluster: the DO node pool and its
 cilium/CSI DaemonSets cannot be staged in a KIND/k3s test cluster.
 """
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 NODE = "noisy-pool-3mrc4u"
 NX_POD = "kube-prometheus-stack-prometheus-node-exporter-wfds9"
@@ -319,7 +319,7 @@ def _age_minutes(age: str) -> int:
     return int(age.rstrip("m"))
 
 
-mcp = FastMCP("noisy-node-mock")
+mcp = MCPServer("noisy-node-mock")
 
 
 @mcp.tool(

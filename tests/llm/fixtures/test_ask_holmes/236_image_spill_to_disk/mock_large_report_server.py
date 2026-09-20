@@ -8,9 +8,9 @@ from disk and read the verification code.
 
 import os
 
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.mcpserver import MCPServer, Image
 
-mcp = FastMCP("Large Report Service")
+mcp = MCPServer("Large Report Service")
 
 _FIXTURE_DIR = os.path.dirname(os.path.abspath(__file__))
 _IMAGE_PATH = os.path.join(_FIXTURE_DIR, "credentials.png")

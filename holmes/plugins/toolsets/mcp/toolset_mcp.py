@@ -14,10 +14,11 @@ from typing import Any, ClassVar, Dict, List, Optional, TextIO, Tuple, Type, Uni
 from urllib.parse import urlparse
 
 import httpx
+import httpx2
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 from mcp.types import Tool as MCP_Tool
 from pydantic import AnyUrl, BaseModel, Field, model_validator
 
@@ -84,28 +85,76 @@ _locks_lock = threading.Lock()
 
 
 def create_mcp_http_client_factory(verify_ssl: bool = True):
-    """Create a factory function for httpx clients with configurable SSL verification."""
+    """Create a factory function for httpx2 clients with configurable SSL verification."""
 
     def factory(
         headers: Dict[str, str] | None = None,
-        timeout: httpx.Timeout | None = None,
-        auth: httpx.Auth | None = None,
-    ) -> httpx.AsyncClient:
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
+    ) -> httpx2.AsyncClient:
         kwargs: Dict[str, Any] = {
-            "follow_redirects": True,
             "verify": verify_ssl,
         }
         if timeout is None:
-            kwargs["timeout"] = httpx.Timeout(SSE_READ_TIMEOUT)
+            kwargs["timeout"] = httpx2.Timeout(SSE_READ_TIMEOUT)
         else:
             kwargs["timeout"] = timeout
         if headers is not None:
             kwargs["headers"] = headers
         if auth is not None:
             kwargs["auth"] = auth
-        return httpx.AsyncClient(**kwargs)
+        return httpx2.AsyncClient(**kwargs)
 
     return factory
+
+
+@asynccontextmanager
+async def _streamable_http_client_compat(url: str, *args: Any, **kwargs: Any):
+    """Compatibility wrapper around streamable_http_client supporting MCP 1.x & 2.x calling conventions."""
+    if "http_client" in kwargs:
+        async with streamable_http_client(url, *args, **kwargs) as streams:
+            yield streams[0], streams[1]
+    else:
+        headers = kwargs.get("headers")
+        factory = kwargs.get("httpx_client_factory")
+        read_timeout = kwargs.get("sse_read_timeout", MCP_TOOL_CALL_TIMEOUT_SEC)
+        if factory:
+            client = factory(headers=headers, timeout=httpx2.Timeout(read_timeout, read=SSE_READ_TIMEOUT))
+        else:
+            client = httpx2.AsyncClient(
+                headers=headers,
+                timeout=httpx2.Timeout(read_timeout, read=SSE_READ_TIMEOUT),
+            )
+        async with client:
+            async with streamable_http_client(url, http_client=client) as streams:
+                yield streams[0], streams[1]
+
+
+streamablehttp_client = _streamable_http_client_compat
+
+
+def _get_mcp_attr(
+    obj: Any, snake_name: str, camel_name: str, default: Any = None
+) -> Any:
+    """Safely get an attribute from MCP SDK objects or unittest mocks.
+
+    MCP 2.x uses snake_case attribute names (e.g. is_error, input_schema,
+    structured_content, mime_type), while MCP 1.x and existing test mocks
+    use camelCase (isError, inputSchema, structuredContent, mimeType).
+    When inspecting unittest.mock objects, avoid autovivifying non-existent
+    attributes into truthy MagicMock instances.
+    """
+    if hasattr(obj, "_mock_name") or hasattr(obj, "_mock_return_value"):
+        if snake_name in obj.__dict__:
+            return getattr(obj, snake_name)
+        if camel_name in obj.__dict__:
+            return getattr(obj, camel_name)
+        return default
+    if hasattr(obj, snake_name):
+        return getattr(obj, snake_name)
+    if hasattr(obj, camel_name):
+        return getattr(obj, camel_name)
+    return default
 
 
 def get_server_lock(url: str) -> threading.Lock:
@@ -277,6 +326,8 @@ async def get_initialized_mcp_session(
     if toolset._mcp_config is None:
         raise ValueError("MCP config is not initialized")
 
+    timeout_sec = float(MCP_TOOL_CALL_TIMEOUT_SEC)
+
     if isinstance(toolset._mcp_config, StdioMCPConfig):
         server_params = StdioServerParameters(
             command=toolset._mcp_config.command,
@@ -285,11 +336,13 @@ async def get_initialized_mcp_session(
         )
         errlog = _get_mcp_log_file(toolset.name)
         try:
-            async with stdio_client(server_params, errlog=errlog) as (
-                read_stream,
-                write_stream,
-            ):
-                async with ClientSession(read_stream, write_stream) as session:
+            async with stdio_client(server_params, errlog=errlog) as streams:
+                read_stream, write_stream = streams[0], streams[1]
+                async with ClientSession(
+                    read_stream,
+                    write_stream,
+                    read_timeout_seconds=timeout_sec,
+                ) as session:
                     _ = await session.initialize()
                     yield session
         finally:
@@ -301,16 +354,14 @@ async def get_initialized_mcp_session(
         async with sse_client(
             url,
             rendered_headers,
-            sse_read_timeout=MCP_TOOL_CALL_TIMEOUT_SEC,
+            sse_read_timeout=timeout_sec,
             httpx_client_factory=httpx_factory,
-        ) as (
-            read_stream,
-            write_stream,
-        ):
+        ) as streams:
+            read_stream, write_stream = streams[0], streams[1]
             async with ClientSession(
                 read_stream,
                 write_stream,
-                read_timeout_seconds=timedelta(seconds=MCP_TOOL_CALL_TIMEOUT_SEC),
+                read_timeout_seconds=timeout_sec,
             ) as session:
                 _ = await session.initialize()
                 yield session
@@ -323,15 +374,12 @@ async def get_initialized_mcp_session(
             headers=rendered_headers,
             sse_read_timeout=MCP_TOOL_CALL_TIMEOUT_SEC,
             httpx_client_factory=httpx_factory,
-        ) as (
-            read_stream,
-            write_stream,
-            _,
-        ):
+        ) as streams:
+            read_stream, write_stream = streams[0], streams[1]
             async with ClientSession(
                 read_stream,
                 write_stream,
-                read_timeout_seconds=timedelta(seconds=MCP_TOOL_CALL_TIMEOUT_SEC),
+                read_timeout_seconds=timeout_sec,
             ) as session:
                 _ = await session.initialize()
                 yield session
@@ -539,7 +587,7 @@ class RemoteMCPTool(Tool):
             blob = getattr(resource, "blob", None)
             if blob is None:
                 return ""
-            mime = getattr(resource, "mimeType", "") or ""
+            mime = _get_mcp_attr(resource, "mime_type", "mimeType", "") or ""
             uri = getattr(resource, "uri", "")
             if (
                 mime.startswith("text/")
@@ -660,12 +708,17 @@ class RemoteMCPTool(Tool):
                 invocation=f"MCPtool {self.name} with params {params}",
             )
 
-        is_error = tool_result.isError or self._is_content_error(merged_text)
+        is_error = _get_mcp_attr(
+            tool_result, "is_error", "isError", False
+        ) or self._is_content_error(merged_text)
 
         images = None
         if not is_error:
             images = [
-                {"data": c.data, "mimeType": c.mimeType}
+                {
+                    "data": c.data,
+                    "mimeType": _get_mcp_attr(c, "mime_type", "mimeType", ""),
+                }
                 for c in tool_result.content
                 if c.type == "image"
             ] or None
@@ -676,7 +729,15 @@ class RemoteMCPTool(Tool):
                 if is_error
                 else StructuredToolResultStatus.SUCCESS
             ),
-            data=self._merge_result_payload(merged_text, tool_result.structuredContent),
+            data=self._merge_result_payload(
+                merged_text,
+                _get_mcp_attr(
+                    tool_result,
+                    "structured_content",
+                    "structuredContent",
+                    None,
+                ),
+            ),
             images=images,
             params=params,
             invocation=f"MCPtool {self.name} with params {params}",
@@ -689,7 +750,8 @@ class RemoteMCPTool(Tool):
         toolset: "RemoteMCPToolset",
         is_remote: bool = False,
     ):
-        parameters = cls.parse_input_schema(tool.inputSchema)
+        raw_schema = _get_mcp_attr(tool, "input_schema", "inputSchema", {})
+        parameters = cls.parse_input_schema(raw_schema)
         return cls(
             name=tool.name,
             mcp_tool_name=tool.name,
@@ -1201,7 +1263,7 @@ class RemoteMCPToolset(Toolset):
 
         try:
             result = asyncio.run(self._call_health_check_tool_async(tool_name))
-            if result.isError:
+            if _get_mcp_attr(result, "is_error", "isError", False):
                 error_chunks = [
                     RemoteMCPTool._extract_text_from_content_block(c)
                     for c in result.content
@@ -1293,7 +1355,7 @@ class RemoteMCPToolset(Toolset):
         placeholder = MCP_Tool(
             name=self.connect_tool_name,
             description=f"Connect to {self.name} (requires OAuth authentication). Call this tool to authenticate and discover available tools.",
-            inputSchema={"type": "object", "properties": {}},
+            input_schema={"type": "object", "properties": {}},
         )
         self.tools = [RemoteMCPTool.create(placeholder, self)]
         logging.info("OAuth MCP server %s is reachable, registered placeholder tool (auth required)", self.name)

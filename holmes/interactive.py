@@ -43,7 +43,8 @@ from pygments.lexers import guess_lexer
 from rich.console import Console, Group
 from rich.control import Control
 from rich.live import Live
-from rich.markdown import Markdown, Panel
+from rich.markdown import Markdown
+from rich.panel import Panel
 from rich.markup import escape
 from rich.table import Table
 from rich.text import Text

@@ -12,9 +12,9 @@ import os
 import struct
 import zlib
 
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.mcpserver import MCPServer, Image
 
-mcp = FastMCP("Image Gallery Service")
+mcp = MCPServer("Image Gallery Service")
 
 # Gallery has 3 pages of 4 images each = 12 images total.
 # Each image is 400x300 PNG (~1600 Anthropic tokens per image).

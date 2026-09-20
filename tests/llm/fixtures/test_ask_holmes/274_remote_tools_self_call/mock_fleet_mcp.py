@@ -18,9 +18,9 @@ prod-eu-west / prod-ap-south / staging-core (remote tool).
 
 import json
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP("Fleet Diagnostics Service")
+mcp = MCPServer("Fleet Diagnostics Service")
 
 OWN_CLUSTER = "prod-us-east"
 REMOTE_AGENTS = ["prod-eu-west", "prod-ap-south", "staging-core"]

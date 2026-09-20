@@ -2,10 +2,10 @@
 
 import base64
 
-from mcp.server.fastmcp import FastMCP, Image
+from mcp.server.mcpserver import MCPServer, Image
 
 # Create the MCP server
-mcp = FastMCP("STDIO Example Server")
+mcp = MCPServer("STDIO Example Server")
 
 
 @mcp.tool()

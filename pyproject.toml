@@ -14,24 +14,24 @@ python = ">=3.10,<3.14"
 openai = "^2.8.0"
 jiter = "!=0.13.0"  # Exclude 0.13.0 due to corrupted Windows wheel (RECORD file issue)
 jinja2 = "^3.1.2"
-typer = "^0.22.0"
-typer-slim = "^0.22.0"
-python-benedict = "^0.33.1"
-humanize = "^4.9.0"
-rich = "^13.7.1"
-fastapi = "^0.136.3"
-uvicorn = "^0.40"
+typer = "^0.27.2"
+typer-slim = "^0.24.0"
+python-benedict = "^0.38.0"
+humanize = "^4.16.0"
+rich = "^15.0.0"
+fastapi = "^0.141.1"
+uvicorn = "^0.53.0"
 pydantic = "^2.7"
 supabase = "2.28.1"
-colorlog = "^6.8.2"
+colorlog = "^6.12.0"
 python-json-logger = "^3.0.0"
 strenum = "^0.4.15"
-markdown = "^3.6"
-certifi = "^2024.7.4"
-boto3 = "^1.34.145"
+markdown = "^3.10.3"
+certifi = "^2026.7.22"
+boto3 = "^1.43.97"
 cachetools = "^5.5.0"
 bs4 = "^0.0.2"
-markdownify = "^1.1.0"
+markdownify = "^1.2.3"
 opensearch-py = "^2.8.0"
 backoff = "^2.2.1"
 # Pin to stable release (check https://github.com/BerriAI/litellm/releases for updates)
@@ -41,27 +41,27 @@ backoff = "^2.2.1"
 # litellm >= 1.84.0 also fixes CRITICAL CVE-2026-49468 (auth bypass via Host header
 # injection) and relaxes the pinned aiohttp to >=3.10,<4.0, letting us take aiohttp 3.14.1.
 litellm = "^1.101.0"
-sentry-sdk = {extras = ["fastapi"], version = "^2.20.0"}
-confluent-kafka = "^2.6.1"
+sentry-sdk = {extras = ["fastapi"], version = "^2.69.2"}
+confluent-kafka = "^2.15.1"
 kubernetes = "^36.0.3"
-# mcp >= 1.27.2 fixes CVE-2026-52869 and CVE-2026-52870 (both High); >= 1.28.1
-# additionally fixes CVE-2026-59950 (High).
-mcp = "1.28.1"
-prompt-toolkit = "^3.0.51"
-pygments = "^2.18.0"
+# mcp >= 2.2.0 incorporates stateless protocol (2026-07-28 spec), redirect/OAuth hardening,
+# and fixes for CVE-2026-52869, CVE-2026-52870, and CVE-2026-59950.
+mcp = "^2.2.0"
+prompt-toolkit = "^3.0.53"
+pygments = "^2.21.0"
 azure-identity = "^1.23.0"
 azure-core = "^1.34.0"
 requests = "^2.32.4"
-PyJWT = {extras = ["crypto"], version = "^2.8.0"}
+PyJWT = {extras = ["crypto"], version = "^2.14.0"}
 tenacity = "^9.1.2"
 requests-aws4auth = "^1.3.1"
 prometrix = "0.2.12"
 httpx = {extras = ["socks"], version = "^0.28.1"}
 ag-ui-protocol = "^0.1.9"
 google-cloud-aiplatform = ">=1.133.0"
-slack-sdk = "^3.39.0"
+slack-sdk = "^3.44.1"
 
-jq = "^1.10.0"
+jq = "^1.12.0"
 bashlex = "^0.18"
 kopf = "^1.37.0"
 apscheduler = "^3.10.4"
@@ -70,13 +70,13 @@ apscheduler = "^3.10.4"
 # Starlette >= 1.3.1 fixes CVE-2026-54283 (HIGH: request.form() size limits
 # silently ignored) and CVE-2026-54282; >= 1.0.1 already fixed CVE-2026-48710 /
 # GHSA-86qp-5c8j-p5mr (Host header validation when reconstructing request.url).
-starlette = ">=1.3.1"
+starlette = ">=1.6.0"
 # cryptography >= 48.0.1 ships a patched OpenSSL in its wheels (GHSA-537c-gmf6-5ccf, HIGH);
 # >= 50.0.0 fixes CVE-2026-69247 (HIGH).
 # Use >= (not ^): ^ caps at the next major and would downgrade newer majors already on master.
 cryptography = ">=50.0.0"
 # pydantic-settings >= 2.14.2 fixes GHSA-4xgf-cpjx-pc3j (symlink escape out of secrets_dir).
-pydantic-settings = ">=2.14.2"
+pydantic-settings = ">=2.15.0"
 # python-multipart >= 0.0.31 fixes CVE-2026-53540 (negative Content-Length buffers the whole body).
 # Use >= (not ^) because Poetry reads ^0.0.31 as ==0.0.31, which would exclude future 0.0.x patches.
 python-multipart = ">=0.0.31"
@@ -86,15 +86,15 @@ aiohttp = ">=3.14.3"
 # pyasn1 >= 0.6.4 fixes CVE-2026-59885 and CVE-2026-59886 (both High).
 # Pulled in transitively via pyasn1-modules -> google-auth.
 pyasn1 = ">=0.6.4"
-urllib3 = "^2.6.3"
-sqlalchemy = "^2.0.46"
+urllib3 = "^2.8.0"
+sqlalchemy = "^2.0.54"
 pg8000 = "^1.31.5"
-pymysql = "^1.1.2"
+pymysql = "^1.2.3"
 clickhouse-sqlalchemy = "^0.3.2"
 python-tds = "^1.17"
 sqlalchemy-pytds = "^1.0.2"
 pyopenssl = ">=24.0.0"
-pymongo = "^4.7.0"
+pymongo = "^4.18.1"
 # Required for HTTP CONNECT proxy support in the websockets stdlib client
 # (used by the conversation worker's Supabase Realtime subscription).
 python-socks = {version = "^2.8.1", extras = ["asyncio"]}
@@ -103,43 +103,43 @@ python-socks = {version = "^2.8.1", extras = ["asyncio"]}
 optional = true
 
 [tool.poetry.group.otel.dependencies]
-opentelemetry-api = "^1.30.0"
-opentelemetry-sdk = "^1.30.0"
-opentelemetry-exporter-otlp-proto-grpc = "^1.30.0"
-opentelemetry-exporter-otlp-proto-http = "^1.30.0"
+opentelemetry-api = "^1.44.0"
+opentelemetry-sdk = "^1.44.0"
+opentelemetry-exporter-otlp-proto-grpc = "^1.44.0"
+opentelemetry-exporter-otlp-proto-http = "^1.44.0"
 opentelemetry-instrumentation-httpx = ">=0.51b0"
 
 [tool.poetry.group.dev]
 optional = true
 
 [tool.poetry.group.dev.dependencies]
-mkdocs-material = "^9.5.39"
-mkdocs-glightbox = "^0.4.0"
+mkdocs-material = "^9.7.7"
+mkdocs-glightbox = "^0.5.2"
 pytest = "^8.3.3"
 pytest-xdist = "^3.6.1"
 pytest-json-report = "^1.5.0"
 ruff = "^0.7.3"
 braintrust = "^0.1.2"
 autoevals = "^0.0.129"
-pre-commit = "^4.0.1"
-responses = "^0.23.1"
+pre-commit = "^4.6.2"
+responses = "^0.26.3"
 freezegun = "^1.5.1"
 tomli = {version = "^2.0.1", python = "<3.11"}
 mypy = "^1.16.0"
 pytest-cov = "^6.2.1"
-types-python-dateutil = "^2.9.0.20250708"
+types-python-dateutil = "^2.9.0.20260807"
 pytest-dotenv = "^0.5.2"
 pytest-sugar = "^1.1.1"
-pytest-shared-session-scope = "^0.4.0"
+pytest-shared-session-scope = "^0.5.2"
 mkdocs-awesome-nav = "^3.2.0"
 mike = "^2.1.0"
 pytest-asyncio = "^1.3.0"
-respx = "^0.22.0"
+respx = "^0.23.1"
 # OpenTelemetry packages for Coralogix eval tests (send traces/metrics)
-opentelemetry-api = "^1.30.0"
-opentelemetry-sdk = "^1.30.0"
-opentelemetry-exporter-otlp-proto-grpc = "^1.30.0"
-opentelemetry-exporter-otlp-proto-http = "^1.30.0"
+opentelemetry-api = "^1.44.0"
+opentelemetry-sdk = "^1.44.0"
+opentelemetry-exporter-otlp-proto-grpc = "^1.44.0"
+opentelemetry-exporter-otlp-proto-http = "^1.44.0"
 
 [build-system]
 requires = ["poetry-core"]

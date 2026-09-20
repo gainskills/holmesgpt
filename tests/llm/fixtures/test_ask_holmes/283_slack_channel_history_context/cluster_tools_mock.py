@@ -12,7 +12,7 @@ WHETHER Holmes reads the Slack channel to disambiguate the node.
 
 import json
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 NODE = "ip-10-0-42-17.eu-west-1.compute.internal"
 
@@ -27,7 +27,7 @@ _NODES += [
     {"name": "ip-10-0-31-9.eu-west-1.compute.internal", "status": "NotReady", "condition": "MemoryPressure"},
 ]
 
-mcp = FastMCP("cluster-tools-mock")
+mcp = MCPServer("cluster-tools-mock")
 
 
 @mcp.tool(name="kubectl_get_nodes", description=(

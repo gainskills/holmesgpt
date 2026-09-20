@@ -9,7 +9,7 @@ guidance added to relay (relay/pkg/apps/mcp/tools/slack.py). Keep them in sync.
 import json
 from typing import Optional
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 CHANNEL_ID = "C08INC283X"
 THREAD_TS = "1721000180.000000"
@@ -46,7 +46,7 @@ def _build_channel():
 
 _CHANNEL_MESSAGES = _build_channel()
 
-mcp = FastMCP("robusta-platform-mcp-stub")
+mcp = MCPServer("robusta-platform-mcp-stub")
 
 
 def _parse_cursor(cursor: Optional[str]) -> int:

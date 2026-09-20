@@ -27,7 +27,7 @@ from pydantic import AnyHttpUrl
 
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
-from mcp.server.fastmcp.server import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_server_url
 
 logger = logging.getLogger(__name__)
@@ -208,7 +208,7 @@ class KeycloakTokenVerifier(TokenVerifier):
                 return None
 
 
-def create_server() -> FastMCP:
+def create_server() -> MCPServer:
     oauth_urls = create_oauth_urls()
     token_verifier = KeycloakTokenVerifier(
         introspection_endpoint=oauth_urls["introspection_endpoint"],
@@ -216,13 +216,10 @@ def create_server() -> FastMCP:
         client_id=MCP_CLIENT_ID,
         client_secret=MCP_CLIENT_SECRET,
     )
-    app = FastMCP(
+    app = MCPServer(
         name="Cloudflare Workers MCP Server",
         instructions="Cloudflare Workers management platform. Use these tools to list workers, view logs, get worker details, and manage KV namespaces.",
-        host=MCP_HOST,
-        port=MCP_PORT,
         debug=True,
-        streamable_http_path="/",
         token_verifier=token_verifier,
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(oauth_urls["issuer"]),
@@ -282,7 +279,7 @@ def create_server() -> FastMCP:
     return app
 
 
-def add_wellknown_routes(app: FastMCP) -> None:
+def add_wellknown_routes(app: MCPServer) -> None:
     """Add RFC 9728 Protected Resource Metadata and OAuth Authorization Server
     metadata endpoints so Holmes can auto-discover OAuth config.
 
@@ -319,8 +316,8 @@ def add_wellknown_routes(app: FastMCP) -> None:
     # Inject routes into the Starlette app before it starts
     original_app_method = app.streamable_http_app
 
-    def patched_streamable_http_app():
-        starlette_app = original_app_method()
+    def patched_streamable_http_app(*args, **kwargs):
+        starlette_app = original_app_method(*args, **kwargs)
         wellknown_routes = [
             Route("/.well-known/oauth-protected-resource", protected_resource_metadata),
             Route("/.well-known/oauth-authorization-server", oauth_authorization_server),
@@ -341,7 +338,7 @@ def main() -> int:
 
     server = create_server()
     add_wellknown_routes(server)
-    server.run(transport="streamable-http")
+    server.run(transport="streamable-http", host=MCP_HOST, port=MCP_PORT, streamable_http_path="/")
     return 0
 
 
