@@ -16,6 +16,7 @@ from typing import (
 )
 
 import typer
+import yaml
 from benedict import benedict  # type: ignore
 from pydantic import BaseModel, BeforeValidator, ConfigDict, ValidationError, model_validator
 
@@ -202,7 +203,8 @@ def parse_model_from_file(
     model: Type[BaseModel], file_path: Path, yaml_path: Optional[str] = None
 ) -> BaseModel:
     """Parse a YAML file into a Pydantic model, propagating ValidationError (for server/API use)."""
-    contents = benedict(file_path, format="yaml")
+    with open(file_path, "r", encoding="utf-8") as f:
+        contents = benedict(yaml.safe_load(f) or {})
     if yaml_path is not None:
         contents = contents[yaml_path]
     return model.model_validate(contents)

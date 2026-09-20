@@ -245,6 +245,9 @@ def load_toolsets_from_config(
         toolset_type: Optional[str] = None
         try:
             toolset_type = config.get("type", ToolsetType.BUILTIN.value)
+            is_enabled = config.get("enabled", True)
+            if isinstance(is_enabled, str):
+                is_enabled = is_enabled.lower() not in ("false", "0", "no")
 
             # Resolve env var placeholders before creating the Toolset.
             # If done after, .override_with() will overwrite resolved values with placeholders
@@ -258,7 +261,9 @@ def load_toolsets_from_config(
             ):
                 saved_extra_headers = config["config"].pop("extra_headers", None)
 
-            if config:
+            # Only resolve env var placeholders for enabled toolsets.
+            # Disabled toolsets should not fail when optional credentials/env vars are unset.
+            if config and is_enabled:
                 config = env_utils.replace_env_vars_values(config)
 
             if saved_extra_headers is not None:

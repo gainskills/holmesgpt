@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 from benedict import benedict
 from pydantic import FilePath
+import yaml
 
 from holmes.core.config import config_path_dir
 from holmes.core.init_event import EventCallback, StatusEvent, StatusEventKind, ToolsetStatus
@@ -743,7 +744,13 @@ class ToolsetManager:
                 raise FileNotFoundError(f"toolset file {toolset_path} does not exist")
 
             try:
-                parsed_yaml = benedict(toolset_path)
+                with open(toolset_path, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f)
+                if not isinstance(data, (dict, list)):
+                    raise ValueError(
+                        f"Invalid data type: {type(data)}, expected dict or list."
+                    )
+                parsed_yaml = benedict(data)
             except Exception as e:
                 raise ValueError(
                     f"Failed to load toolsets from {toolset_path}, error: {e}"

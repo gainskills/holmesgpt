@@ -85,3 +85,43 @@ def test_load_toolsets_from_config(monkeypatch):
     assert config.get("api_key") == "glsa_sdj1q2o3prujpqfd"
     assert config.get("api_url") == "https://my-grafana.com/"
     assert config.get("grafana_datasource_uid") == "my_grafana_datasource_uid"
+
+
+def test_load_toolsets_from_config_disabled_missing_env_vars(monkeypatch):
+    from holmes.core.tools import ToolsetStatusEnum
+
+    # Ensure the environment variable is not present
+    monkeypatch.delenv("CONFLUENCE_API_KEY", raising=False)
+    monkeypatch.delenv("PAGERDUTY_API_KEY", raising=False)
+
+    disabled_config = {
+        "confluence": {
+            "enabled": False,
+            "subtype": "cloud",
+            "config": {
+                "api_url": "https://company.atlassian.net",
+                "user": "{{ env.CONFLUENCE_USER }}",
+                "api_key": "{{ env.CONFLUENCE_API_KEY }}",
+            },
+        },
+        "pagerduty": {
+            "type": "mcp",
+            "enabled": False,
+            "config": {
+                "url": "https://mcp.pagerduty.com/mcp",
+                "mode": "streamable-http",
+                "headers": {
+                    "Authorization": "Token token={{ env.PAGERDUTY_API_KEY }}"
+                },
+            },
+        },
+    }
+
+    definitions = load_toolsets_from_config(
+        toolsets=disabled_config, strict_check=False
+    )
+    assert len(definitions) == 2
+    for toolset in definitions:
+        assert toolset.enabled is False
+        assert toolset.status == ToolsetStatusEnum.DISABLED
+
