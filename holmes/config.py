@@ -4,8 +4,6 @@ import os.path
 import threading
 from enum import Enum
 from pathlib import Path
-
-display_logger = logging.getLogger("holmes.display.config")
 from typing import TYPE_CHECKING, Any, List, Optional, Union
 
 import sentry_sdk
@@ -18,8 +16,16 @@ from pydantic import (
     SecretStr,
 )
 
+from holmes.common.env_vars import TOOLSET_STATUS_REFRESH_INTERVAL_SECONDS
+from holmes.core.config import config_path_dir
 from holmes.core.init_event import EventCallback, StatusEvent, StatusEventKind
 from holmes.core.llm import DefaultLLM, LLMModelRegistry
+from holmes.core.oauth_utils import (
+    eager_load_oauth_tools,
+    preload_oauth_tokens,
+    set_oauth_dal,
+)
+from holmes.core.supabase_dal import SupabaseDal
 from holmes.core.tools import PrerequisiteCacheMode, Toolset, ToolsetTag
 from holmes.core.tools_utils.tool_executor import ToolExecutor
 from holmes.core.toolset_manager import ToolsetManager
@@ -33,6 +39,12 @@ from holmes.plugins.skills.skill_loader import (
     SkillCatalog,
     load_skill_catalog,
 )
+from holmes.utils.definitions import RobustaConfig
+from holmes.utils.pydantic_utils import (
+    RobustaBaseConfig,
+    load_model_from_file,
+    parse_model_from_file,
+)
 
 # Source plugin imports moved to their respective create methods to speed up startup
 if TYPE_CHECKING:
@@ -44,21 +56,7 @@ if TYPE_CHECKING:
     from holmes.plugins.sources.pagerduty import PagerDutySource
     from holmes.plugins.sources.prometheus.plugin import AlertManagerSource
 
-from holmes.common.env_vars import TOOLSET_STATUS_REFRESH_INTERVAL_SECONDS
-from holmes.core.config import config_path_dir
-from holmes.core.oauth_utils import (
-    eager_load_oauth_tools,
-    preload_oauth_tokens,
-    set_oauth_dal,
-)
-from holmes.core.supabase_dal import SupabaseDal
-from holmes.utils.definitions import RobustaConfig
-from holmes.utils.pydantic_utils import (
-    RobustaBaseConfig,
-    load_model_from_file,
-    parse_model_from_file,
-)
-
+display_logger = logging.getLogger("holmes.display.config")
 
 DEFAULT_CONFIG_LOCATION = os.path.join(config_path_dir, "config.yaml")
 
@@ -933,8 +931,8 @@ class SourceFactory(BaseModel):
         ticket_id: Optional[str],
         model: Optional[str] = None,
     ) -> TicketSource:
-        from holmes.plugins.sources.jira import JiraServiceManagementSource
-        from holmes.plugins.sources.pagerduty import PagerDutySource
+        from holmes.plugins.sources.jira import JiraServiceManagementSource  # noqa: F401
+        from holmes.plugins.sources.pagerduty import PagerDutySource  # noqa: F401
 
         TicketSource.model_rebuild()
         supported_sources = [s.value for s in SupportedTicketSources]

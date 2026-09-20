@@ -16,10 +16,9 @@ Environment variables:
   MCP_SERVER_URL     - Public server URL for OAuth resource metadata (default: http://localhost:MCP_PORT)
 """
 
-import datetime
 import logging
 import os
-from typing import Any, Optional
+from typing import Any
 from urllib.parse import urljoin
 
 import httpx
@@ -249,7 +248,7 @@ def create_server() -> MCPServer:
         if worker_name not in WORKER_LOGS:
             return {"error": f"Worker '{worker_name}' not found", "available_workers": [w["name"] for w in WORKERS]}
         logs = WORKER_LOGS[worker_name][:limit]
-        error_count = sum(1 for l in logs if l.get("level") == "ERROR")
+        error_count = sum(1 for entry in logs if entry.get("level") == "ERROR")
         return {
             "worker_name": worker_name,
             "logs": logs,

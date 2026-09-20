@@ -23,9 +23,9 @@ from holmes.core.prompt import (
     is_component_enabled,
     todowrite_overrides,
 )
+from holmes.utils.global_instructions import generate_skills_args
 
 TODOWRITE_SYSTEM_PROMPT_HEADER = "# Task management (TodoWrite)"
-from holmes.utils.global_instructions import generate_skills_args
 
 
 class DummySkillCatalog:

@@ -6,7 +6,7 @@
 #   wheel >= 0.46.2     CVE-2026-24049
 #   pip >= 26.1         CVE-2026-3219/6357, CVE-2025-8869
 #   setuptools >= 80.0  CVE-2026-1703 (final-stage system Python only)
-ARG PIP_MIN_VERSION=26.1
+ARG PIP_MIN_VERSION=26.2.1
 ARG WHEEL_MIN_VERSION=0.46.2
 ARG SETUPTOOLS_MIN_VERSION=80.0.0
 

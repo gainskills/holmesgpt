@@ -36,7 +36,6 @@ from holmes.core.oauth_config import (
     MCPOAuthConfig,
     OAuthDecisionCode,
     OAuthEndpoints,
-    OAuthExchangeManager,
     OAuthTokenExchangeError,
     _get_exchange_manager,
     exchange_code_for_tokens,
@@ -2224,7 +2223,6 @@ class TestInvokeOAuthConnectReturnsTools:
 
     def test_connect_returns_oauth_tools_in_result(self):
         """_invoke_oauth_connect populates oauth_tools on the result."""
-        from unittest.mock import AsyncMock
 
         ts = RemoteMCPToolset(name="test-mcp", enabled=True)
         ts._mcp_config = MCPConfig(
