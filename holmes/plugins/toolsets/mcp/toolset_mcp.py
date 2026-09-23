@@ -24,6 +24,7 @@ from holmes.core.oauth_config import (
     MCPOAuthConfig,
     OAuthEndpoints,
     _get_exchange_manager,
+    exchange_code_for_tokens,
 )
 from holmes.core.oauth_utils import (
     _get_token_manager,
@@ -409,6 +410,20 @@ class RemoteMCPTool(Tool):
         token = mgr.get_access_token(oauth_config, context.request_context, disk_key=disk_key)
         if token:
             logger.info("OAuth MCP %s: token available via manager", self.toolset.name)
+            return None
+
+        if oauth_config.grant_type == "client_credentials":
+            # Direct machine-to-machine exchange without browser prompt
+            token_data = exchange_code_for_tokens(
+                token_url=oauth_config.token_url,
+                client_id=oauth_config.client_id,
+                client_secret=oauth_config.client_secret,
+                grant_type="client_credentials",
+                resource=oauth_config.resource,
+                scope=" ".join(oauth_config.scopes) if oauth_config.scopes else None,
+            )
+            mgr.store_token(oauth_config, token_data, context.request_context, disk_key=disk_key)
+            logger.info("OAuth MCP %s: client_credentials auth successful", self.toolset.name)
             return None
 
         # No token found anywhere — need to authenticate
@@ -1081,8 +1096,11 @@ class RemoteMCPToolset(Toolset):
                 final_headers.update(rendered)
 
         # Inject OAuth Bearer token if available (only when authorization_url is
-        # known — before discovery it's None and we can't look up a token yet)
-        if self.is_oauth_enabled and self._mcp_config.oauth.authorization_url:
+        # known, or for client_credentials where authorization_url is not used)
+        if self.is_oauth_enabled and (
+            self._mcp_config.oauth.authorization_url
+            or self._mcp_config.oauth.grant_type == "client_credentials"
+        ):
             oauth_config = self._mcp_config.oauth
             cached_token = _get_token_manager().get_access_token(oauth_config, request_context)
             if cached_token:
@@ -1117,7 +1135,13 @@ class RemoteMCPToolset(Toolset):
         ]
         # Set icon from config if specified
         if self.icon_url is None and self.config:
-            self.icon_url = self.config.get("icon_url")
+            if isinstance(self.config, dict):
+                self.icon_url = self.config.get("icon_url")
+            elif hasattr(self.config, "icon_url"):
+                self.icon_url = self.config.icon_url
+
+        if isinstance(self.config, (MCPConfig, StdioMCPConfig)):
+            self._mcp_config = self.config
 
     @model_validator(mode="before")
     @classmethod
@@ -1335,9 +1359,15 @@ class RemoteMCPToolset(Toolset):
             )
 
             # Auto-discover OAuth endpoints if not configured
-            if not oauth_config.authorization_url or not oauth_config.token_url or not oauth_config.client_id:
+            if oauth_config.grant_type == "client_credentials":
+                needs_discovery = not oauth_config.token_url or not oauth_config.client_id
+            else:
+                needs_discovery = not oauth_config.authorization_url or not oauth_config.token_url or not oauth_config.client_id
+            if needs_discovery:
                 discovered = self._discover_oauth_endpoints(url, response)
                 if not discovered:
+                    if oauth_config.grant_type == "client_credentials":
+                        return (False, f"MCP server {self.name}: OAuth enabled but auto-discovery failed. Configure token_url, client_id, and client_secret manually.")
                     return (False, f"MCP server {self.name}: OAuth enabled but auto-discovery failed. Configure authorization_url, token_url, and client_id manually.")
 
         except Exception as e:

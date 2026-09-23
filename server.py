@@ -9,6 +9,8 @@ if add_custom_certificate(ADDITIONAL_CERTIFICATE):
 
 # DO NOT ADD ANY IMPORTS OR CODE ABOVE THIS LINE
 # IMPORTING ABOVE MIGHT INITIALIZE AN HTTPS CLIENT THAT DOESN'T TRUST THE CUSTOM CERTIFICATE
+from collections import defaultdict
+import html
 import json
 import logging
 import ssl
@@ -16,18 +18,23 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import colorlog
+import httpx
 import litellm
 from pydantic import BaseModel
-from holmes.core.oauth_config import OAuthConfigLookupError, OAuthTokenExchangeError
+from holmes.core.oauth_config import (
+    OAuthConfigLookupError,
+    OAuthTokenExchangeError,
+    _get_exchange_manager,
+)
 from holmes.core.oauth_server_callbacks import process_oauth_callback
 from holmes.core.oauth_utils import _get_token_manager
 import sentry_sdk
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from litellm.exceptions import AuthenticationError
 from holmes import get_version, is_official_release
 from holmes.common.env_vars import (
@@ -489,6 +496,384 @@ def oauth_callback(request: OAuthCallbackRequest) -> OAuthCallbackResponse:
     except Exception as e:
         logging.error(f"OAuth callback failed for '{request.toolset_name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Native OAuth Callback (GET) & Rate Limiting ────────────────────────────
+
+_callback_ip_lock = threading.Lock()
+_callback_ip_history: Dict[str, List[float]] = defaultdict(list)
+
+
+def _is_callback_rate_limited(request: Request) -> bool:
+    """Sliding-window rate limiter: max 10 requests per minute per IP."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    elif request.client and request.client.host:
+        client_ip = request.client.host
+    else:
+        client_ip = "unknown"
+
+    now = time.time()
+    window_start = now - 60.0
+
+    with _callback_ip_lock:
+        # Prune expired IP keys to prevent unbounded memory growth
+        expired_ips = [
+            ip for ip, ts in _callback_ip_history.items()
+            if not any(t > window_start for t in ts)
+        ]
+        for ip in expired_ips:
+            _callback_ip_history.pop(ip, None)
+
+        timestamps = [t for t in _callback_ip_history.get(client_ip, []) if t > window_start]
+        if len(timestamps) >= 10:
+            _callback_ip_history[client_ip] = timestamps
+            return True
+        timestamps.append(now)
+        _callback_ip_history[client_ip] = timestamps
+        return False
+
+
+_is_rate_limited = _is_callback_rate_limited
+
+
+def _render_callback_html(
+    title: str,
+    badge_type: str,
+    badge_text: str,
+    icon: str,
+    heading: str,
+    message: str,
+    details: Optional[str] = None,
+) -> str:
+    """Render a clean, responsive HTML page for OAuth callback responses."""
+    details_html = ""
+    if details:
+        details_html = f'<div class="details">{html.escape(details)}</div>'
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{html.escape(title)} - HolmesGPT</title>
+  <style>
+    :root {{
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg: #0f172a;
+        --card-bg: #1e293b;
+        --text: #f8fafc;
+        --muted: #94a3b8;
+        --border: #334155;
+      }}
+    }}
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      margin: 0;
+      padding: 1.5rem;
+      box-sizing: border-box;
+    }}
+    .card {{
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2.5rem;
+      max-width: 480px;
+      width: 100%;
+      text-align: center;
+      box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+    }}
+    .icon {{
+      font-size: 3rem;
+      margin-bottom: 1rem;
+    }}
+    h1 {{
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 0 0 0.75rem;
+    }}
+    p {{
+      color: var(--muted);
+      font-size: 0.95rem;
+      line-height: 1.5;
+      margin: 0 0 1.25rem;
+    }}
+    .details {{
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.85rem;
+      color: var(--text);
+      word-break: break-word;
+      text-align: left;
+      margin-bottom: 1.25rem;
+    }}
+    .badge {{
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      border-radius: 9999px;
+      font-size: 0.8rem;
+      font-weight: 500;
+      margin-bottom: 1rem;
+    }}
+    .badge-success {{ background: #dcfce7; color: #15803d; }}
+    .badge-error {{ background: #fee2e2; color: #b91c1c; }}
+    .badge-warning {{ background: #fef3c7; color: #b45309; }}
+    @media (prefers-color-scheme: dark) {{
+      .badge-success {{ background: #14532d; color: #86efac; }}
+      .badge-error {{ background: #7f1d1d; color: #fca5a5; }}
+      .badge-warning {{ background: #78350f; color: #fcd34d; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">{icon}</div>
+    <div class="badge badge-{badge_type}">{html.escape(badge_text)}</div>
+    <h1>{html.escape(heading)}</h1>
+    <p>{message}</p>
+    {details_html}
+  </div>
+</body>
+</html>"""
+
+
+def _render_success_html(toolset_name: str) -> HTMLResponse:
+    safe_name = html.escape(toolset_name)
+    content = _render_callback_html(
+        title="Authentication Successful",
+        badge_type="success",
+        badge_text="Connected",
+        icon="&#x2705;",
+        heading="Authentication Successful",
+        message=f"You have successfully authenticated with <strong>{safe_name}</strong>.<br>You can now close this browser tab and return to HolmesGPT.",
+    )
+    return HTMLResponse(content=content, status_code=200)
+
+
+def _render_idp_error_html(
+    toolset_name: str, error: str, error_description: Optional[str] = None
+) -> HTMLResponse:
+    safe_name = html.escape(toolset_name)
+    details = f"error: {error}"
+    if error_description:
+        details += f"\nerror_description: {error_description}"
+    content = _render_callback_html(
+        title="Authentication Failed",
+        badge_type="error",
+        badge_text="Authorization Rejected",
+        icon="&#x274C;",
+        heading="Authentication Failed",
+        message=f"The identity provider rejected the authentication request for <strong>{safe_name}</strong>.",
+        details=details,
+    )
+    return HTMLResponse(content=content, status_code=400)
+
+
+def _render_session_expired_html(toolset_name: str) -> HTMLResponse:
+    safe_name = html.escape(toolset_name)
+    content = _render_callback_html(
+        title="Session Expired",
+        badge_type="warning",
+        badge_text="Session Expired",
+        icon="&#x23F3;",
+        heading="Authentication Session Expired",
+        message=f"This authentication session for <strong>{safe_name}</strong> has expired (10-minute limit) or is invalid.<br>Please return to HolmesGPT and retry your request.",
+    )
+    return HTMLResponse(content=content, status_code=400)
+
+
+def _render_rate_limit_html() -> HTMLResponse:
+    content = _render_callback_html(
+        title="Too Many Requests",
+        badge_type="error",
+        badge_text="Rate Limited (429)",
+        icon="&#x1F6D1;",
+        heading="Too Many Requests",
+        message="Too many authentication callback requests received. Please wait a minute before trying again.",
+    )
+    return HTMLResponse(content=content, status_code=429)
+
+
+def _render_exchange_error_html(toolset_name: str, detail: str) -> HTMLResponse:
+    safe_name = html.escape(toolset_name)
+    content = _render_callback_html(
+        title="Token Exchange Failed",
+        badge_type="error",
+        badge_text="Bad Gateway (502)",
+        icon="&#x26A0;&#xFE0F;",
+        heading="Token Exchange Failed",
+        message=f"HolmesGPT could not exchange the authorization code for an access token with <strong>{safe_name}</strong>.",
+        details=detail,
+    )
+    return HTMLResponse(content=content, status_code=502)
+
+
+def _render_timeout_html(toolset_name: str, detail: Optional[str] = None) -> HTMLResponse:
+    safe_name = html.escape(toolset_name)
+    content = _render_callback_html(
+        title="Gateway Timeout",
+        badge_type="warning",
+        badge_text="Gateway Timeout (504)",
+        icon="&#x23F1;&#xFE0F;",
+        heading="Gateway Timeout",
+        message=f"Connecting to the token endpoint for <strong>{safe_name}</strong> timed out.<br>Please check your cluster egress network connectivity, firewall rules, or proxy configuration.",
+        details=detail,
+    )
+    return HTMLResponse(content=content, status_code=504)
+
+
+def _render_internal_error_html(toolset_name: str, detail: str) -> HTMLResponse:
+    safe_name = html.escape(toolset_name)
+    content = _render_callback_html(
+        title="Internal Error",
+        badge_type="error",
+        badge_text="Server Error (500)",
+        icon="&#x274C;",
+        heading="Internal Server Error",
+        message=f"An unexpected error occurred while processing the OAuth callback for <strong>{safe_name}</strong>.",
+        details=detail,
+    )
+    return HTMLResponse(content=content, status_code=500)
+
+
+@app.get("/api/oauth/callback", response_class=HTMLResponse)
+@app.get("/callback", response_class=HTMLResponse)
+def oauth_callback_get(
+    request: Request,
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    error_description: Optional[str] = None,
+) -> HTMLResponse:
+    # 1. Rate Limiting Check
+    if _is_callback_rate_limited(request):
+        logging.warning("OAuth callback rate limit exceeded for IP")
+        return _render_rate_limit_html()
+
+    # 2. IdP Error Check
+    if error:
+        logging.warning(
+            "OAuth callback received error from IdP: error=%s, description=%s",
+            error,
+            error_description,
+        )
+        toolset_name = "MCP Server"
+        if state:
+            exchange_mgr = _get_exchange_manager()
+            with exchange_mgr._lock:
+                pending = exchange_mgr._pending.get(state)
+            if pending:
+                toolset_name = (
+                    getattr(pending, "toolset_name", None)
+                    or getattr(pending.oauth_config, "resource", None)
+                    or "MCP Server"
+                )
+        return _render_idp_error_html(
+            toolset_name=toolset_name,
+            error=error,
+            error_description=error_description,
+        )
+
+    # 3. State & Session Validation
+    if not state or not code:
+        logging.warning(
+            "OAuth callback missing code or state parameter (code=%s, state=%s)",
+            bool(code),
+            bool(state),
+        )
+        return _render_session_expired_html(toolset_name="MCP Server")
+
+    exchange_mgr = _get_exchange_manager()
+    with exchange_mgr._lock:
+        pending = exchange_mgr._pending.get(state)
+
+    if not pending:
+        logging.warning("OAuth callback: no pending exchange found for state=%s", state)
+        return _render_session_expired_html(toolset_name="MCP Server")
+
+    # Check 10-minute TTL (600 seconds)
+    if time.monotonic() - pending.created_at > 600:
+        logging.warning(
+            "OAuth callback: pending exchange expired for state=%s (age=%.1fs)",
+            state,
+            time.monotonic() - pending.created_at,
+        )
+        with exchange_mgr._lock:
+            exchange_mgr._pending.pop(state, None)
+        toolset_name = getattr(pending, "toolset_name", None) or "MCP Server"
+        return _render_session_expired_html(toolset_name=toolset_name)
+
+    toolset_name = (
+        getattr(pending, "toolset_name", None)
+        or getattr(pending.oauth_config, "resource", None)
+        or "MCP Server"
+    )
+
+    # 4. Construct OAuthCallbackRequest and call process_oauth_callback
+    redirect_uri = pending.redirect_uri or str(request.url).split("?")[0]
+    callback_request = OAuthCallbackRequest(
+        toolset_name=toolset_name,
+        code=code,
+        code_verifier=pending.code_verifier,
+        redirect_uri=redirect_uri,
+        client_id=pending.oauth_config.client_id,
+        client_secret=pending.oauth_config.client_secret,
+        resource=pending.oauth_config.resource,
+        state=state,
+    )
+
+    try:
+        executor = config.create_tool_executor(
+            dal=dal,
+            reuse_executor=True,
+            prerequisite_cache=PrerequisiteCacheMode.DISABLED,
+        )
+        process_oauth_callback(
+            callback_request,
+            executor.toolsets,
+            _get_token_manager(),
+            executor=executor,
+        )
+        with exchange_mgr._lock:
+            exchange_mgr._pending.pop(state, None)
+        return _render_success_html(toolset_name=toolset_name)
+
+    except httpx.TimeoutException as e:
+        logging.error("OAuth token exchange timed out for '%s': %s", toolset_name, e)
+        return _render_timeout_html(toolset_name=toolset_name, detail=str(e))
+    except OAuthTokenExchangeError as e:
+        logging.error("OAuth token exchange failed for '%s': %s", toolset_name, e)
+        if isinstance(e.__cause__, httpx.TimeoutException) or "timed out" in str(e).lower():
+            return _render_timeout_html(toolset_name=toolset_name, detail=str(e))
+        return _render_exchange_error_html(toolset_name=toolset_name, detail=str(e))
+    except OAuthConfigLookupError as e:
+        logging.error("OAuth config error for '%s': %s", toolset_name, e.detail)
+        return _render_exchange_error_html(toolset_name=toolset_name, detail=e.detail)
+    except Exception as e:
+        logging.error(
+            "Unexpected error in OAuth callback for '%s': %s",
+            toolset_name,
+            e,
+            exc_info=True,
+        )
+        return _render_internal_error_html(toolset_name=toolset_name, detail=str(e))
 
 
 def already_answered(conversation_history: Optional[List[dict]]) -> bool:

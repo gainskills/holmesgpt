@@ -3,8 +3,9 @@
 import json
 import logging
 import threading
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, Field, model_validator
@@ -38,14 +39,16 @@ class OAuthConfigLookupError(Exception):
 
 def exchange_code_for_tokens(
     token_url: str,
-    code: str,
-    redirect_uri: str,
-    client_id: str,
+    code: Optional[str] = None,
+    redirect_uri: Optional[str] = None,
+    client_id: str = "",
     code_verifier: Optional[str] = None,
     client_secret: Optional[str] = None,
     resource: Optional[str] = None,
+    grant_type: str = "authorization_code",
+    scope: Optional[str] = None,
 ) -> dict:
-    """Exchange an OAuth authorization code for tokens at the IdP's token endpoint.
+    """Exchange an OAuth authorization code or client credentials for tokens at the IdP's token endpoint.
 
     ``resource`` is the RFC 8707 resource indicator (the MCP server's canonical
     URL). The MCP authorization spec (rev 2025-06-18) requires it in the token
@@ -54,14 +57,21 @@ def exchange_code_for_tokens(
     Returns the parsed JSON token response (containing at least ``access_token``).
     Raises :class:`OAuthTokenExchangeError` on HTTP failure or missing ``access_token``.
     """
-    data = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
+    data: Dict[str, Any] = {
+        "grant_type": grant_type,
         "client_id": client_id,
     }
-    if code_verifier:
-        data["code_verifier"] = code_verifier
+    if grant_type == "authorization_code":
+        if code:
+            data["code"] = code
+        if redirect_uri:
+            data["redirect_uri"] = redirect_uri
+        if code_verifier:
+            data["code_verifier"] = code_verifier
+    elif grant_type == "client_credentials":
+        if scope:
+            data["scope"] = scope
+
     if resource:
         data["resource"] = resource
 
@@ -150,6 +160,10 @@ class MCPOAuthConfig(BaseModel):
     """
 
     enabled: bool = Field(default=False, description="Enable OAuth for this MCP server. Auto-set to true when other OAuth fields are provided.")
+    grant_type: Literal["authorization_code", "client_credentials"] = Field(
+        default="authorization_code",
+        description="OAuth grant type to use.",
+    )
     authorization_url: Optional[str] = Field(default=None, description="IdP authorization endpoint URL. Auto-discovered if omitted.")
     token_url: Optional[str] = Field(default=None, description="IdP token endpoint URL. Auto-discovered if omitted.")
     client_id: Optional[str] = Field(default=None, description="OAuth public client ID. Auto-registered via DCR if omitted.")
@@ -212,10 +226,18 @@ def parse_oauth_decision(decision: Optional[Dict[str, Any]]) -> Optional[OAuthDe
 class _PendingOAuthExchange:
     """State for a pending OAuth approval: PKCE verifier and config."""
 
-    def __init__(self, code_verifier: str, oauth_config: MCPOAuthConfig, redirect_uri: str) -> None:
+    def __init__(
+        self,
+        code_verifier: str,
+        oauth_config: MCPOAuthConfig,
+        redirect_uri: str,
+        toolset_name: Optional[str] = None,
+    ) -> None:
         self.code_verifier = code_verifier
         self.oauth_config = oauth_config
         self.redirect_uri = redirect_uri
+        self.toolset_name = toolset_name
+        self.created_at = time.monotonic()
 
 
 class OAuthExchangeManager:
@@ -236,6 +258,7 @@ class OAuthExchangeManager:
         code_verifier: str,
         oauth_config: MCPOAuthConfig,
         redirect_uri: str = "",
+        toolset_name: Optional[str] = None,
     ) -> None:
         """Register a pending OAuth exchange for the given tool call."""
         with self._lock:
@@ -243,6 +266,7 @@ class OAuthExchangeManager:
                 code_verifier=code_verifier,
                 oauth_config=oauth_config,
                 redirect_uri=redirect_uri,
+                toolset_name=toolset_name,
             )
 
     def complete_exchange(

@@ -1549,11 +1549,13 @@ class TestGetUserId:
         ctx = {"user_id": "user-42"}
         assert _get_user_id(ctx) == "user-42"
 
-    def test_returns_none_when_missing(self):
-        assert _get_user_id({}) is None
+    def test_returns_default_cluster_user_when_missing(self):
+        from holmes.plugins.toolsets.mcp.oauth_token_manager import DEFAULT_CLUSTER_USER
+        assert _get_user_id({}) == DEFAULT_CLUSTER_USER
 
-    def test_returns_none_when_context_is_none(self):
-        assert _get_user_id(None) is None
+    def test_returns_default_cluster_user_when_context_is_none(self):
+        from holmes.plugins.toolsets.mcp.oauth_token_manager import DEFAULT_CLUSTER_USER
+        assert _get_user_id(None) == DEFAULT_CLUSTER_USER
 
 
 # ---------------------------------------------------------------------------
@@ -2612,45 +2614,45 @@ class TestUserIdGuard:
 
         manager.shutdown()
 
-    def test_store_token_refused_without_user_id(self):
+    def test_store_token_falls_back_to_cluster_user_without_user_id(self):
+        from holmes.plugins.toolsets.mcp.oauth_token_manager import DEFAULT_CLUSTER_USER
+
         manager = self._make_manager(with_dal=True)
         oauth = self._oauth()
 
         with patch.object(manager._store, "store_token") as mock_store:
             manager.store_token(
                 oauth,
-                {"access_token": "should-not-persist", "expires_in": 3600},
+                {"access_token": "should-persist", "expires_in": 3600},
                 request_context=None,
             )
 
-        assert mock_store.call_count == 0
+        assert mock_store.call_count == 1
+        assert mock_store.call_args[1]["user_id"] == DEFAULT_CLUSTER_USER
 
         manager.shutdown()
 
-    def test_get_cache_key_raises_without_user_id(self):
-        """Cache-key computation must refuse to silently substitute a default."""
+    def test_get_cache_key_falls_back_to_cluster_user(self):
+        """Cache-key computation falls back to DEFAULT_CLUSTER_USER when user_id is missing."""
+        from holmes.plugins.toolsets.mcp.oauth_token_manager import DEFAULT_CLUSTER_USER
+
         manager = self._make_manager(with_dal=True)
         oauth = self._oauth()
 
-        with pytest.raises(ValueError):
-            manager.get_cache_key(oauth, None)
-        with pytest.raises(ValueError):
-            manager.get_cache_key(oauth, {"user_id": None})
+        expected = manager._build_cache_key(DEFAULT_CLUSTER_USER, oauth.authorization_url)
+        assert manager.get_cache_key(oauth, None) == expected
+        assert manager.get_cache_key(oauth, {"user_id": None}) == expected
 
         manager.shutdown()
 
-    def test_require_user_id_raises_when_missing(self):
-        """require_user_id must fail-fast so callers like OAuthToolConnector
-        never receive None and silently pass it into per-user storage."""
+    def test_require_user_id_falls_back_to_cluster_user(self):
+        from holmes.plugins.toolsets.mcp.oauth_token_manager import DEFAULT_CLUSTER_USER
+
         manager = self._make_manager(with_dal=True)
 
-        with pytest.raises(ValueError):
-            manager.require_user_id(None)
-        with pytest.raises(ValueError):
-            manager.require_user_id({"user_id": None})
-        with pytest.raises(ValueError):
-            manager.require_user_id({"user_id": ""})
-
+        assert manager.require_user_id(None) == DEFAULT_CLUSTER_USER
+        assert manager.require_user_id({"user_id": None}) == DEFAULT_CLUSTER_USER
+        assert manager.require_user_id({"user_id": ""}) == DEFAULT_CLUSTER_USER
         assert manager.require_user_id({"user_id": "alice"}) == "alice"
 
         manager.shutdown()
@@ -2691,3 +2693,659 @@ class TestUserIdGuard:
 
 
 # ---------------------------------------------------------------------------
+# Multi-Grant & Session Timeout (Task 1)
+# ---------------------------------------------------------------------------
+
+
+def test_oauth_callback_request_accepts_state():
+    from holmes.core.models import OAuthCallbackRequest
+
+    req = OAuthCallbackRequest(
+        toolset_name="test_toolset",
+        code="auth_code_123",
+        redirect_uri="http://localhost:8080/api/oauth/callback",
+        state="state_nonce_abc",
+    )
+    assert req.state == "state_nonce_abc"
+
+
+def test_mcp_oauth_config_grant_type_default_and_custom():
+    from holmes.core.oauth_config import MCPOAuthConfig
+
+    default_cfg = MCPOAuthConfig(token_url="https://idp/token", client_id="cid")
+    assert default_cfg.grant_type == "authorization_code"
+
+    cc_cfg = MCPOAuthConfig(
+        token_url="https://idp/token",
+        client_id="cid",
+        client_secret="sec",
+        grant_type="client_credentials",
+    )
+    assert cc_cfg.grant_type == "client_credentials"
+
+
+def test_pending_oauth_exchange_has_created_at():
+    import time
+    from holmes.core.oauth_config import _PendingOAuthExchange, MCPOAuthConfig
+
+    cfg = MCPOAuthConfig(token_url="https://idp/token", client_id="cid")
+    now = time.monotonic()
+    pending = _PendingOAuthExchange(code_verifier="cv", oauth_config=cfg, redirect_uri="http://cb")
+    assert pending.created_at >= now
+
+
+def test_exchange_code_for_tokens_client_credentials():
+    with patch(
+        "holmes.core.oauth_config.httpx.post",
+        return_value=MagicMock(
+            status_code=200,
+            is_success=True,
+            json=lambda: {"access_token": "cc-token-123", "token_type": "Bearer"},
+        ),
+    ) as mock_post:
+        token_data = exchange_code_for_tokens(
+            token_url="https://idp.example.com/token",
+            client_id="my-client",
+            client_secret="my-secret",
+            grant_type="client_credentials",
+            scope="read:all",
+        )
+    assert token_data["access_token"] == "cc-token-123"
+    sent_data = mock_post.call_args[1]["data"]
+    assert sent_data["grant_type"] == "client_credentials"
+    assert sent_data["client_id"] == "my-client"
+    assert sent_data["scope"] == "read:all"
+    assert "code" not in sent_data
+    assert "redirect_uri" not in sent_data
+    assert "code_verifier" not in sent_data
+
+
+def test_k8s_secret_token_store_crud(monkeypatch):
+    import base64
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import MagicMock
+    from kubernetes.client.exceptions import ApiException
+    from kubernetes.client.models import V1Secret, V1ObjectMeta
+    from holmes.plugins.toolsets.mcp.oauth_token_store import K8sSecretTokenStore
+
+    mock_core_api = MagicMock()
+    # Mock secret does not exist initially
+    mock_core_api.read_namespaced_secret.side_effect = ApiException(status=404)
+
+    store = K8sSecretTokenStore(secret_name="test-tokens", namespace="default")
+    store._api_client = mock_core_api
+
+    token_data = {"access_token": "k8s-token-123", "expires_in": 3600, "refresh_token": "rt-123"}
+    # Store should create secret on 404
+    success = store.store_token("sumologic", token_data, user_id="cluster_user")
+    assert success is True
+    assert mock_core_api.create_namespaced_secret.called
+
+    # Store when secret already exists
+    existing_secret = V1Secret(
+        metadata=V1ObjectMeta(name="test-tokens", namespace="default"),
+        data={"sumologic__cluster_user": base64.b64encode(json.dumps(token_data).encode()).decode()},
+    )
+    mock_core_api.read_namespaced_secret.side_effect = None
+    mock_core_api.read_namespaced_secret.return_value = existing_secret
+
+    new_token_data = {"access_token": "k8s-token-456", "expires_in": 1800}
+    success = store.store_token("sumologic", new_token_data, user_id="cluster_user")
+    assert success is True
+    assert mock_core_api.patch_namespaced_secret.called
+
+    # get_token
+    read_secret = V1Secret(
+        metadata=V1ObjectMeta(name="test-tokens", namespace="default"),
+        data={"sumologic__cluster_user": base64.b64encode(json.dumps({
+            "access_token": "k8s-token-456",
+            "token_expiry": (datetime.now(timezone.utc) + timedelta(seconds=1800)).isoformat(),
+        }).encode()).decode()},
+    )
+    mock_core_api.read_namespaced_secret.return_value = read_secret
+    loaded = store.get_token("sumologic", user_id="cluster_user")
+    assert loaded is not None
+    assert loaded["access_token"] == "k8s-token-456"
+    assert "_remaining_ttl" in loaded
+    assert loaded["_remaining_ttl"] > 0
+
+    # get_token with provider alias
+    loaded_alias = store.get_token("other_name", user_id="cluster_user", provider_aliases=["sumologic"])
+    assert loaded_alias is not None
+    assert loaded_alias["access_token"] == "k8s-token-456"
+
+    # get_all_for_preload
+    preload_items = store.get_all_for_preload()
+    assert len(preload_items) == 1
+    assert preload_items[0]["user_id"] == "cluster_user"
+    assert preload_items[0]["token_data"]["access_token"] == "k8s-token-456"
+
+    # delete_token existing
+    del_success = store.delete_token("sumologic", user_id="cluster_user")
+    assert del_success is True
+    assert mock_core_api.replace_namespaced_secret.called
+
+    # delete_token non-existing key
+    del_fail = store.delete_token("nonexistent", user_id="cluster_user")
+    assert del_fail is False
+
+
+def test_oauth_token_manager_fallback_user_id():
+    from holmes.plugins.toolsets.mcp.oauth_token_manager import _get_user_id, DEFAULT_CLUSTER_USER
+    assert _get_user_id(None) == DEFAULT_CLUSTER_USER
+    assert _get_user_id({}) == DEFAULT_CLUSTER_USER
+    assert _get_user_id({"user_id": "alice"}) == "alice"
+
+
+def test_oauth_token_manager_set_dal_k8s_secret_store(monkeypatch):
+    from holmes.plugins.toolsets.mcp.oauth_token_manager import OAuthTokenManager
+    from holmes.plugins.toolsets.mcp.oauth_token_store import DalTokenStore, K8sSecretTokenStore
+    from unittest.mock import MagicMock
+
+    mgr = OAuthTokenManager()
+    mgr._shutdown_event.set()
+
+    # 1. Dal enabled
+    dal_mock = MagicMock(enabled=True)
+    mgr.set_dal(dal_mock)
+    assert isinstance(mgr._store, DalTokenStore)
+
+    # 2. Dal disabled, running in K8s
+    mgr._store = None
+    monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.0.0.1")
+    mgr.set_dal(None)
+    assert isinstance(mgr._store, K8sSecretTokenStore)
+
+    # 3. Dal disabled with object (enabled=False), running in K8s
+    mgr._store = None
+    dal_disabled = MagicMock(enabled=False)
+    mgr.set_dal(dal_disabled)
+    assert isinstance(mgr._store, K8sSecretTokenStore)
+
+    mgr.shutdown()
+
+
+def test_k8s_secret_token_store_namespace_detection(tmp_path, monkeypatch):
+    from pathlib import Path
+    from holmes.plugins.toolsets.mcp.oauth_token_store import K8sSecretTokenStore
+
+    # 1. From serviceaccount file
+    sa_dir = tmp_path / "var" / "run" / "secrets" / "kubernetes.io" / "serviceaccount"
+    sa_dir.mkdir(parents=True)
+    ns_file = sa_dir / "namespace"
+    ns_file.write_text("my-custom-ns\n")
+
+    def mock_path(p):
+        if str(p) == "/var/run/secrets/kubernetes.io/serviceaccount/namespace":
+            return ns_file
+        return Path(p)
+
+    monkeypatch.setattr("holmes.plugins.toolsets.mcp.oauth_token_store.Path", mock_path)
+    store = K8sSecretTokenStore()
+    assert store._namespace == "my-custom-ns"
+
+    # 2. From POD_NAMESPACE env var
+    monkeypatch.setenv("POD_NAMESPACE", "env-ns")
+    monkeypatch.setattr("holmes.plugins.toolsets.mcp.oauth_token_store.Path", Path)
+    store2 = K8sSecretTokenStore()
+    assert store2._namespace == "env-ns"
+
+    # 3. Default fallback
+    monkeypatch.delenv("POD_NAMESPACE", raising=False)
+    store3 = K8sSecretTokenStore()
+    assert store3._namespace == "default"
+
+
+def test_oauth_token_manager_k8s_secret_store_end_to_end(monkeypatch):
+    """Cross-layer invariant integration test:
+    Verifies OAuthTokenManager with K8sSecretTokenStore end-to-end.
+    Tokens stored without user_id persist into K8s Secret under DEFAULT_CLUSTER_USER,
+    can be preloaded into a fresh manager cache, and are served to cluster requests.
+    """
+    import base64
+    from unittest.mock import MagicMock
+    from kubernetes.client.exceptions import ApiException
+    from holmes.plugins.toolsets.mcp.oauth_token_manager import (
+        DEFAULT_CLUSTER_USER,
+        OAuthTokenManager,
+    )
+    from holmes.plugins.toolsets.mcp.oauth_token_store import K8sSecretTokenStore
+
+    # Mock in-memory secret dictionary to simulate Kubernetes Secret API persistence
+    secret_storage = {}
+
+    mock_core_api = MagicMock()
+
+    def mock_read(name, namespace):
+        if name not in secret_storage:
+            raise ApiException(status=404)
+        mock_sec = MagicMock()
+        mock_sec.data = dict(secret_storage[name])
+        mock_sec.string_data = {}
+        return mock_sec
+
+    def mock_create(namespace, body):
+        name = body.metadata.name
+        secret_storage[name] = {}
+        for k, v in (body.string_data or {}).items():
+            secret_storage[name][k] = base64.b64encode(v.encode()).decode()
+        return body
+
+    def mock_patch(name, namespace, body):
+        if name not in secret_storage:
+            raise ApiException(status=404)
+        for k, v in (body.string_data or {}).items():
+            secret_storage[name][k] = base64.b64encode(v.encode()).decode()
+        return body
+
+    mock_core_api.read_namespaced_secret.side_effect = mock_read
+    mock_core_api.create_namespaced_secret.side_effect = mock_create
+    mock_core_api.patch_namespaced_secret.side_effect = mock_patch
+
+    store = K8sSecretTokenStore(secret_name="holmes-mcp-tokens", namespace="default")
+    store._api_client = mock_core_api
+
+    manager = OAuthTokenManager()
+    manager._shutdown_event.set()
+    manager._store = store
+
+    oauth_config = MCPOAuthConfig(
+        enabled=True,
+        authorization_url="https://idp.example.com/oauth/authorize",
+        token_url="https://idp.example.com/oauth/token",
+        client_id="mcp-client",
+    )
+    token_data = {
+        "access_token": "k8s-cluster-token-xyz",
+        "expires_in": 3600,
+        "refresh_token": "k8s-refresh-token-xyz",
+    }
+
+    # 1. Store token without request_context (defaults to DEFAULT_CLUSTER_USER)
+    manager.store_token(oauth_config, token_data, request_context=None)
+
+    # Verify token stored into K8s Secret
+    assert "holmes-mcp-tokens" in secret_storage
+    secret_keys = list(secret_storage["holmes-mcp-tokens"].keys())
+    assert any(DEFAULT_CLUSTER_USER in k for k in secret_keys)
+
+    # 2. Instantiate fresh manager with the same store and cold cache
+    fresh_manager = OAuthTokenManager()
+    fresh_manager._shutdown_event.set()
+    fresh_manager._store = store
+
+    # Cold cache check: should be empty before preload
+    cache_key = fresh_manager._build_cache_key(DEFAULT_CLUSTER_USER, oauth_config.authorization_url)
+    assert fresh_manager._cache.get_valid_access_token(cache_key) is None
+
+    # 3. Preload from store (simulates pod restart warmup)
+    fresh_manager.preload_from_store()
+
+    # 4. Assert get_access_token without user_id returns token
+    served_token = fresh_manager.get_access_token(oauth_config, request_context=None)
+    assert served_token == "k8s-cluster-token-xyz"
+
+    manager.shutdown()
+    fresh_manager.shutdown()
+
+
+def test_k8s_secret_token_store_decode_non_dict():
+    from holmes.plugins.toolsets.mcp.oauth_token_store import K8sSecretTokenStore
+
+    assert K8sSecretTokenStore._decode_token_value("12345") is None
+    assert K8sSecretTokenStore._decode_token_value('"just a string"') is None
+    assert K8sSecretTokenStore._decode_token_value("[1, 2, 3]") is None
+    assert K8sSecretTokenStore._decode_token_value(None) is None
+    assert K8sSecretTokenStore._decode_token_value("") is None
+    assert K8sSecretTokenStore._decode_token_value('{"valid": "dict"}') == {"valid": "dict"}
+
+
+def test_client_credentials_flow_in_toolset(monkeypatch):
+    from unittest.mock import MagicMock
+    from holmes.plugins.toolsets.mcp.toolset_mcp import RemoteMCPToolset, RemoteMCPTool, MCPConfig, MCPOAuthConfig
+    from holmes.core.tools import ToolInvokeContext
+    from holmes.core.oauth_utils import _get_token_manager
+
+    cfg = MCPConfig(
+        url="http://mock-mcp/sse",
+        oauth=MCPOAuthConfig(
+            grant_type="client_credentials",
+            token_url="http://mock-idp/token",
+            client_id="my-client",
+            client_secret="my-secret",
+            scopes=["mcp:read", "mcp:write"],
+        ),
+    )
+    toolset = RemoteMCPToolset(name="test_cc", enabled=True)
+    toolset._mcp_config = cfg
+    tool = RemoteMCPTool(
+        name="test_tool",
+        description="test",
+        parameters={},
+        toolset=toolset,
+    )
+    toolset.tools = [tool]
+
+    context = MagicMock(spec=ToolInvokeContext)
+    context.user_approved = False
+    context.tool_call_id = "tc-cc-123"
+    context.request_context = {"user_id": "test-user", "headers": {"X-Conversation-Id": "conv-1"}}
+
+    mgr = _get_token_manager()
+    cache_key = mgr.get_cache_key(cfg.oauth, context.request_context)
+    mgr.cache.evict(cache_key)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.is_success = True
+    mock_resp.json.return_value = {"access_token": "cc-token-xyz", "expires_in": 3600}
+
+    with monkeypatch.context() as m:
+        mock_post = MagicMock(return_value=mock_resp)
+        m.setattr("holmes.core.oauth_config.httpx.post", mock_post)
+
+        params = {}
+        approval = tool.requires_approval(params, context)
+
+        # Direct machine-to-machine exchange without browser prompt
+        assert approval is None
+        assert "__oauth_metadata" not in params
+
+        # Verify token exchange call
+        mock_post.assert_called_once()
+        call_kwargs = mock_post.call_args
+        assert call_kwargs[0][0] == "http://mock-idp/token"
+        assert call_kwargs[1]["data"]["grant_type"] == "client_credentials"
+        assert call_kwargs[1]["data"]["client_id"] == "my-client"
+        assert call_kwargs[1]["data"]["scope"] == "mcp:read mcp:write"
+
+        # Verify token is stored and accessible
+        token = mgr.get_access_token(cfg.oauth, context.request_context)
+        assert token == "cc-token-xyz"
+
+        # Subsequent call uses cached token without calling endpoint again
+        mock_post.reset_mock()
+        second_approval = tool.requires_approval(params, context)
+        assert second_approval is None
+        mock_post.assert_not_called()
+
+
+def test_client_credentials_flow_in_cli_mode(monkeypatch):
+    from unittest.mock import MagicMock
+    from holmes.plugins.toolsets.mcp.toolset_mcp import RemoteMCPToolset, RemoteMCPTool, MCPConfig, MCPOAuthConfig
+    from holmes.core.tools import ToolInvokeContext
+    from holmes.core.oauth_utils import _get_token_manager
+
+    cfg = MCPConfig(
+        url="http://mock-mcp/sse",
+        oauth=MCPOAuthConfig(
+            grant_type="client_credentials",
+            token_url="http://mock-idp/token",
+            client_id="my-client",
+            client_secret="my-secret",
+        ),
+    )
+    toolset = RemoteMCPToolset(name="test_cc_cli", enabled=True)
+    toolset._mcp_config = cfg
+    tool = RemoteMCPTool(name="test_tool", description="test", parameters={}, toolset=toolset)
+    toolset.tools = [tool]
+
+    context = MagicMock(spec=ToolInvokeContext)
+    context.user_approved = False
+    context.tool_call_id = "tc-cli"
+    context.request_context = None
+
+    mgr = _get_token_manager()
+    cache_key = mgr.get_cache_key(cfg.oauth, None)
+    mgr.cache.evict(cache_key)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.is_success = True
+    mock_resp.json.return_value = {"access_token": "cli-cc-token-456", "expires_in": 3600}
+
+    with monkeypatch.context() as m:
+        mock_cli_flow = MagicMock()
+        m.setattr("holmes.plugins.toolsets.mcp.toolset_mcp.cli_oauth_flow", mock_cli_flow)
+        m.setattr("holmes.core.oauth_config.httpx.post", MagicMock(return_value=mock_resp))
+
+        params = {}
+        approval = tool.requires_approval(params, context)
+        assert approval is None
+        # Must NOT attempt to open browser in CLI mode for client_credentials
+        mock_cli_flow.assert_not_called()
+
+
+def test_client_credentials_renders_bearer_header(monkeypatch):
+    from unittest.mock import MagicMock
+    from holmes.plugins.toolsets.mcp.toolset_mcp import RemoteMCPToolset, RemoteMCPTool, MCPConfig, MCPOAuthConfig
+    from holmes.core.tools import ToolInvokeContext
+    from holmes.core.oauth_utils import _get_token_manager
+
+    cfg = MCPConfig(
+        url="http://mock-mcp/sse",
+        oauth=MCPOAuthConfig(
+            grant_type="client_credentials",
+            token_url="http://mock-idp/token",
+            client_id="my-client",
+            client_secret="my-secret",
+        ),
+    )
+    toolset = RemoteMCPToolset(name="test_cc_headers", enabled=True)
+    toolset._mcp_config = cfg
+    tool = RemoteMCPTool(
+        name="test_tool",
+        description="test",
+        parameters={},
+        toolset=toolset,
+    )
+    toolset.tools = [tool]
+
+    context = MagicMock(spec=ToolInvokeContext)
+    context.request_context = {"user_id": "test-user", "headers": {"X-Conversation-Id": "conv-1"}}
+
+    mgr = _get_token_manager()
+    cache_key = mgr.get_cache_key(cfg.oauth, context.request_context)
+    mgr.cache.evict(cache_key)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.is_success = True
+    mock_resp.json.return_value = {"access_token": "cc-header-token-abc", "expires_in": 3600}
+
+    with monkeypatch.context() as m:
+        m.setattr("holmes.core.oauth_config.httpx.post", MagicMock(return_value=mock_resp))
+        assert tool.requires_approval({}, context) is None
+
+    headers = toolset._render_headers(context.request_context)
+    assert headers is not None
+    assert headers.get("Authorization") == "Bearer cc-header-token-abc"
+
+
+def test_client_credentials_check_server_reachable_no_discovery_needed():
+    from unittest.mock import MagicMock, patch
+    from holmes.plugins.toolsets.mcp.toolset_mcp import RemoteMCPToolset, MCPConfig, MCPOAuthConfig
+
+    cfg = MCPConfig(
+        url="http://mock-mcp/sse",
+        oauth=MCPOAuthConfig(
+            grant_type="client_credentials",
+            token_url="http://mock-idp/token",
+            client_id="my-client",
+            client_secret="my-secret",
+        ),
+    )
+    toolset = RemoteMCPToolset(name="test_cc_reachable", enabled=True)
+    toolset._mcp_config = cfg
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+
+    with patch("holmes.plugins.toolsets.mcp.toolset_mcp.httpx.get", return_value=mock_resp):
+        with patch.object(toolset, "_discover_oauth_endpoints") as mock_discover:
+            ok, msg = toolset._check_oauth_server_reachable()
+            assert ok is True
+            assert msg == ""
+            mock_discover.assert_not_called()
+            # Placeholder tool should be registered
+            assert len(toolset.tools) == 1
+            assert toolset.tools[0].name == toolset.connect_tool_name
+
+
+def test_client_credentials_flow_exchange_error(monkeypatch):
+    from unittest.mock import MagicMock
+    from holmes.plugins.toolsets.mcp.toolset_mcp import RemoteMCPToolset, RemoteMCPTool, MCPConfig, MCPOAuthConfig
+    from holmes.core.oauth_config import OAuthTokenExchangeError
+    from holmes.core.oauth_utils import _get_token_manager
+    from holmes.core.tools import ToolInvokeContext
+
+    cfg = MCPConfig(
+        url="http://mock-mcp-err/sse",
+        oauth=MCPOAuthConfig(
+            grant_type="client_credentials",
+            token_url="http://mock-idp-err/token",
+            client_id="my-client",
+            client_secret="bad-secret",
+        ),
+    )
+    toolset = RemoteMCPToolset(name="test_cc_err", enabled=True)
+    toolset._mcp_config = cfg
+    tool = RemoteMCPTool(name="test_tool", description="test", parameters={}, toolset=toolset)
+
+    context = MagicMock(spec=ToolInvokeContext)
+    context.user_approved = False
+    context.tool_call_id = "tc-err"
+    context.request_context = {"user_id": "test-user"}
+
+    mgr = _get_token_manager()
+    cache_key = mgr.get_cache_key(cfg.oauth, context.request_context)
+    mgr.cache.evict(cache_key)
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "holmes.plugins.toolsets.mcp.toolset_mcp.exchange_code_for_tokens",
+            MagicMock(side_effect=OAuthTokenExchangeError(401, "Invalid client credentials")),
+        )
+        with pytest.raises(OAuthTokenExchangeError) as exc_info:
+            tool.requires_approval({}, context)
+        assert exc_info.value.status_code == 401
+
+
+def test_client_credentials_distinct_token_urls_no_collision_and_restart():
+    import base64
+    from unittest.mock import MagicMock
+    from holmes.plugins.toolsets.mcp.oauth_token_manager import OAuthTokenManager, DEFAULT_CLUSTER_USER
+    from holmes.plugins.toolsets.mcp.oauth_token_store import K8sSecretTokenStore
+    from kubernetes.client.exceptions import ApiException
+
+    secret_storage = {}
+
+    def mock_read(name, namespace):
+        if name in secret_storage:
+            mock_sec = MagicMock()
+            mock_sec.data = secret_storage[name]
+            return mock_sec
+        raise ApiException(status=404)
+
+    def mock_create(namespace, body):
+        name = body.metadata.name
+        secret_storage[name] = {}
+        for k, v in (body.string_data or {}).items():
+            secret_storage[name][k] = base64.b64encode(v.encode()).decode()
+        return body
+
+    def mock_patch(name, namespace, body):
+        if name not in secret_storage:
+            raise ApiException(status=404)
+        for k, v in (body.string_data or {}).items():
+            secret_storage[name][k] = base64.b64encode(v.encode()).decode()
+        return body
+
+    mock_core_api = MagicMock()
+    mock_core_api.read_namespaced_secret.side_effect = mock_read
+    mock_core_api.create_namespaced_secret.side_effect = mock_create
+    mock_core_api.patch_namespaced_secret.side_effect = mock_patch
+
+    store = K8sSecretTokenStore(secret_name="holmes-mcp-tokens", namespace="default")
+    store._api_client = mock_core_api
+
+    manager = OAuthTokenManager()
+    manager._shutdown_event.set()
+    manager._store = store
+
+    config_a = MCPOAuthConfig(
+        grant_type="client_credentials",
+        token_url="https://idp-a.example.com/token",
+        client_id="client-a",
+        client_secret="secret-a",
+    )
+    config_b = MCPOAuthConfig(
+        grant_type="client_credentials",
+        token_url="https://idp-b.example.com/token",
+        client_id="client-b",
+        client_secret="secret-b",
+    )
+
+    # 1. Verify cache keys are distinct and do NOT collide on empty string hash
+    key_a = manager.get_cache_key(config_a)
+    key_b = manager.get_cache_key(config_b)
+    assert key_a != key_b
+
+    # 2. Store tokens for both providers
+    manager.store_token(config_a, {"access_token": "token-a-123", "expires_in": 3600})
+    manager.store_token(config_b, {"access_token": "token-b-456", "expires_in": 3600})
+
+    # 3. Verify in-memory cache holds distinct tokens
+    assert manager.get_access_token(config_a) == "token-a-123"
+    assert manager.get_access_token(config_b) == "token-b-456"
+
+    # 4. Verify persistent store keys are distinct (neither is "unknown")
+    secret_data = secret_storage["holmes-mcp-tokens"]
+    assert len(secret_data) == 2
+    assert not any("unknown" in k for k in secret_data.keys())
+
+    # 5. Simulate restart: instantiate fresh manager with same store and cold cache
+    fresh_manager = OAuthTokenManager()
+    fresh_manager._shutdown_event.set()
+    fresh_manager._store = store
+
+    # Preload from store (simulates restart warmup)
+    fresh_manager.preload_from_store()
+
+    # 6. Verify fresh manager serves both tokens without collision
+    assert fresh_manager.get_access_token(config_a) == "token-a-123"
+    assert fresh_manager.get_access_token(config_b) == "token-b-456"
+
+    manager.shutdown()
+    fresh_manager.shutdown()
+
+
+def test_client_credentials_discovery_failure_error_message():
+    from unittest.mock import MagicMock, patch
+    from holmes.plugins.toolsets.mcp.toolset_mcp import RemoteMCPToolset, MCPConfig, MCPOAuthConfig
+
+    cfg = MCPConfig(
+        url="http://mock-mcp/sse",
+        oauth=MCPOAuthConfig(
+            grant_type="client_credentials",
+            token_url=None,  # triggers discovery
+            client_id="my-client",
+        ),
+    )
+    toolset = RemoteMCPToolset(name="test_cc_fail", enabled=True)
+    toolset._mcp_config = cfg
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.headers = {}
+
+    with patch("holmes.plugins.toolsets.mcp.toolset_mcp.httpx.get", return_value=mock_resp):
+        with patch.object(toolset, "_discover_oauth_endpoints", return_value=False):
+            ok, msg = toolset._check_oauth_server_reachable()
+            assert ok is False
+            assert "Configure token_url, client_id, and client_secret manually." in msg
+
+
+
+

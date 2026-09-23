@@ -1,6 +1,6 @@
 from fastapi import Request
 
-AUTH_EXEMPT_PATHS = {"/healthz", "/readyz"}
+AUTH_EXEMPT_PATHS = {"/healthz", "/readyz", "/api/oauth/callback", "/callback"}
 
 
 def extract_api_key(request: Request) -> str:

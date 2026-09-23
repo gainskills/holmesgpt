@@ -582,3 +582,159 @@ class TestExtractPassthroughHeaders:
         assert "authorization" in result["headers"]
         assert "cookie" in result["headers"]
         assert "x-tenant-id" in result["headers"]
+
+
+# ── Native OAuth Callback (GET) Tests ─────────────────────────────────────
+
+
+def test_oauth_callback_get_success(client, monkeypatch):
+    from holmes.core.oauth_config import _get_exchange_manager, MCPOAuthConfig
+
+    tool_call_id = "tc-get-test"
+    _get_exchange_manager().register_pending(
+        tool_call_id=tool_call_id,
+        code_verifier="verifier-123",
+        oauth_config=MCPOAuthConfig(token_url="http://mock/token", client_id="cid"),
+        redirect_uri="http://localhost:8080/api/oauth/callback",
+    )
+    with monkeypatch.context() as m:
+        m.setattr(
+            "holmes.core.oauth_server_callbacks.exchange_code_for_tokens",
+            lambda **kwargs: {"access_token": "at-123"},
+        )
+        response = client.get(f"/api/oauth/callback?code=code-123&state={tool_call_id}")
+        assert response.status_code == 200
+        assert "Authentication Successful" in response.text
+
+
+def test_oauth_callback_alias_path(client, monkeypatch):
+    response = client.get("/callback?error=access_denied&error_description=User+cancelled")
+    assert response.status_code == 400
+    assert "access_denied" in response.text
+
+
+def test_oauth_callback_session_expired(client):
+    import time
+    from holmes.core.oauth_config import _get_exchange_manager, MCPOAuthConfig
+
+    # Case 1: Unknown state
+    response = client.get("/api/oauth/callback?code=code-123&state=nonexistent-state")
+    assert response.status_code == 400
+    assert "Session Expired" in response.text
+
+    # Case 2: Expired state (> 600s)
+    tool_call_id = "tc-expired-test"
+    mgr = _get_exchange_manager()
+    mgr.register_pending(
+        tool_call_id=tool_call_id,
+        code_verifier="verifier-123",
+        oauth_config=MCPOAuthConfig(token_url="http://mock/token", client_id="cid"),
+        redirect_uri="http://localhost:8080/api/oauth/callback",
+    )
+    with mgr._lock:
+        mgr._pending[tool_call_id].created_at = time.monotonic() - 601
+
+    response = client.get(f"/api/oauth/callback?code=code-123&state={tool_call_id}")
+    assert response.status_code == 400
+    assert "Session Expired" in response.text
+
+
+def test_oauth_callback_rate_limit(client):
+    import server
+
+    # Reset IP history to avoid test pollution
+    if hasattr(server, "_callback_ip_history"):
+        with server._callback_ip_lock:
+            server._callback_ip_history.clear()
+
+    try:
+        # 10 requests allowed
+        for _ in range(10):
+            resp = client.get("/callback?error=access_denied&error_description=cancelled")
+            assert resp.status_code == 400
+
+        # 11th request rejected with 429
+        resp = client.get("/callback?error=access_denied&error_description=cancelled")
+        assert resp.status_code == 429
+        assert "Too Many Requests" in resp.text or "Rate Limited" in resp.text
+    finally:
+        if hasattr(server, "_callback_ip_history"):
+            with server._callback_ip_lock:
+                server._callback_ip_history.clear()
+
+
+def test_callback_rate_limiter_prunes_expired_ips():
+    import time
+    from fastapi import Request
+    import server
+
+    with server._callback_ip_lock:
+        server._callback_ip_history.clear()
+        # Add an expired IP entry
+        server._callback_ip_history["expired-ip"] = [time.time() - 120.0]
+
+    try:
+        req = Request(
+            {
+                "type": "http",
+                "headers": [(b"x-forwarded-for", b"active-ip")],
+                "client": ("127.0.0.1", 12345),
+            }
+        )
+        is_limited = server._is_callback_rate_limited(req)
+        assert not is_limited
+
+        with server._callback_ip_lock:
+            assert "expired-ip" not in server._callback_ip_history
+            assert "active-ip" in server._callback_ip_history
+    finally:
+        with server._callback_ip_lock:
+            server._callback_ip_history.clear()
+
+
+def test_oauth_callback_timeout_504(client, monkeypatch):
+    import httpx
+    from holmes.core.oauth_config import _get_exchange_manager, MCPOAuthConfig
+
+    tool_call_id = "tc-timeout-test"
+    _get_exchange_manager().register_pending(
+        tool_call_id=tool_call_id,
+        code_verifier="verifier-123",
+        oauth_config=MCPOAuthConfig(token_url="http://mock/token", client_id="cid"),
+        redirect_uri="http://localhost:8080/api/oauth/callback",
+    )
+    with monkeypatch.context() as m:
+        m.setattr(
+            "holmes.core.oauth_server_callbacks.exchange_code_for_tokens",
+            MagicMock(side_effect=httpx.ConnectTimeout("Connection timed out")),
+        )
+        response = client.get(f"/api/oauth/callback?code=code-123&state={tool_call_id}")
+        assert response.status_code == 504
+        assert "Gateway Timeout" in response.text
+
+
+def test_oauth_callback_exchange_error_502(client, monkeypatch):
+    from holmes.core.oauth_config import _get_exchange_manager, MCPOAuthConfig, OAuthTokenExchangeError
+
+    tool_call_id = "tc-error-test"
+    _get_exchange_manager().register_pending(
+        tool_call_id=tool_call_id,
+        code_verifier="verifier-123",
+        oauth_config=MCPOAuthConfig(token_url="http://mock/token", client_id="cid"),
+        redirect_uri="http://localhost:8080/api/oauth/callback",
+    )
+    with monkeypatch.context() as m:
+        m.setattr(
+            "holmes.core.oauth_server_callbacks.exchange_code_for_tokens",
+            MagicMock(side_effect=OAuthTokenExchangeError(400, "invalid_grant: code expired")),
+        )
+        response = client.get(f"/api/oauth/callback?code=code-123&state={tool_call_id}")
+        assert response.status_code == 502
+        assert "Token Exchange Failed" in response.text
+
+
+def test_oauth_callback_auth_exemption():
+    from holmes.utils.auth import AUTH_EXEMPT_PATHS
+    assert "/api/oauth/callback" in AUTH_EXEMPT_PATHS
+    assert "/callback" in AUTH_EXEMPT_PATHS
+

@@ -5,12 +5,16 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from kubernetes import client, config
+from kubernetes.client.exceptions import ApiException
 
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives.hashes import SHA256
@@ -465,3 +469,264 @@ class DiskTokenStore(TokenStore):
                 return json.load(f)
         except Exception:
             return {}
+
+
+# ── Kubernetes Secret token store ─────────────────────────────────────────
+
+
+class K8sSecretTokenStore(TokenStore):
+    """Persists OAuth tokens into a Kubernetes Secret (holmes-mcp-tokens)."""
+
+    def __init__(self, secret_name: str = "holmes-mcp-tokens", namespace: Optional[str] = None) -> None:
+        self._secret_name = secret_name
+        self._namespace = namespace or self._detect_namespace()
+        self._api_client: Optional[Any] = None
+        self._lock = threading.Lock()
+
+    @staticmethod
+    def _detect_namespace() -> str:
+        ns_file = Path("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+        if ns_file.exists():
+            try:
+                return ns_file.read_text().strip()
+            except Exception:
+                pass
+        return os.environ.get("POD_NAMESPACE", "default")
+
+    def _get_api(self) -> Any:
+        if self._api_client is None:
+            with self._lock:
+                if self._api_client is None:
+                    try:
+                        config.load_incluster_config()
+                    except Exception:
+                        try:
+                            config.load_kube_config()
+                        except Exception:
+                            pass
+                    self._api_client = client.CoreV1Api()
+        return self._api_client
+
+    def _format_key(self, provider_name: str, user_id: Optional[str] = None) -> str:
+        raw = f"{provider_name}__{user_id or 'default'}"
+        return re.sub(r"[^a-zA-Z0-9_.-]", "_", raw)
+
+    @staticmethod
+    def _decode_token_value(val: Any) -> Optional[Dict[str, Any]]:
+        if not val:
+            return None
+        if isinstance(val, dict):
+            return val
+        if isinstance(val, bytes):
+            val = val.decode("utf-8")
+        if not isinstance(val, str):
+            return None
+        val = val.strip()
+
+        parsed: Any = None
+        if val.startswith("{"):
+            try:
+                parsed = json.loads(val)
+            except Exception:
+                pass
+        if parsed is None:
+            try:
+                decoded = base64.b64decode(val.encode("utf-8")).decode("utf-8")
+                parsed = json.loads(decoded)
+            except Exception:
+                pass
+        if parsed is None:
+            try:
+                parsed = json.loads(val)
+            except Exception:
+                pass
+
+        if isinstance(parsed, dict):
+            return parsed
+        return None
+
+    def get_token(
+        self,
+        provider_name: str,
+        user_id: Optional[str] = None,
+        provider_aliases: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        api = self._get_api()
+        try:
+            try:
+                secret = api.read_namespaced_secret(self._secret_name, self._namespace)
+            except ApiException as e:
+                if e.status == 404:
+                    return None
+                raise
+        except Exception:
+            logger.warning("Failed to read K8s Secret %s in namespace %s", self._secret_name, self._namespace, exc_info=True)
+            return None
+
+        secret_dict: Dict[str, Any] = {}
+        if getattr(secret, "data", None):
+            secret_dict.update(secret.data)
+        if getattr(secret, "string_data", None):
+            secret_dict.update(secret.string_data)
+
+        providers_to_try: List[str] = []
+        if provider_name:
+            providers_to_try.append(provider_name)
+        if provider_aliases:
+            providers_to_try.extend(provider_aliases)
+        if not providers_to_try:
+            providers_to_try.append("unknown")
+
+        for prov in providers_to_try:
+            key = self._format_key(prov, user_id)
+            raw_val = secret_dict.get(key)
+            if not raw_val:
+                continue
+            token_data = self._decode_token_value(raw_val)
+            if not token_data or not token_data.get("access_token"):
+                continue
+
+            token_expiry_str = token_data.get("token_expiry")
+            if token_expiry_str:
+                try:
+                    token_expiry = datetime.fromisoformat(token_expiry_str)
+                    remaining = (token_expiry - datetime.now(timezone.utc)).total_seconds()
+                    token_data["_remaining_ttl"] = max(int(remaining), 1)
+                except (ValueError, TypeError):
+                    pass
+            return token_data
+
+        return None
+
+    def store_token(
+        self,
+        provider_name: str,
+        token_data: Dict[str, Any],
+        user_id: Optional[str] = None,
+        token_url: Optional[str] = None,
+        client_id: Optional[str] = None,
+        resource: Optional[str] = None,
+    ) -> bool:
+        enriched = dict(token_data)
+        if token_url:
+            enriched["token_url"] = token_url
+        if client_id:
+            enriched["client_id"] = client_id
+        if resource is not None:
+            enriched["resource"] = resource
+        if provider_name:
+            enriched["provider_name"] = provider_name
+        if user_id:
+            enriched["user_id"] = user_id
+
+        if token_data.get("expires_in") and "token_expiry" not in enriched:
+            enriched["token_expiry"] = (datetime.now(timezone.utc) + timedelta(seconds=token_data["expires_in"])).isoformat()
+
+        key = self._format_key(provider_name, user_id)
+        json_str = json.dumps(enriched)
+
+        api = self._get_api()
+        with self._lock:
+            try:
+                secret_exists = True
+                try:
+                    api.read_namespaced_secret(self._secret_name, self._namespace)
+                except ApiException as e:
+                    if e.status == 404:
+                        secret_exists = False
+                    else:
+                        raise
+
+                if not secret_exists:
+                    secret_body = client.V1Secret(
+                        metadata=client.V1ObjectMeta(name=self._secret_name, namespace=self._namespace),
+                        string_data={key: json_str},
+                    )
+                    try:
+                        api.create_namespaced_secret(namespace=self._namespace, body=secret_body)
+                    except ApiException as e:
+                        if e.status == 409:
+                            patch_body = client.V1Secret(string_data={key: json_str})
+                            api.patch_namespaced_secret(name=self._secret_name, namespace=self._namespace, body=patch_body)
+                        else:
+                            raise
+                else:
+                    patch_body = client.V1Secret(string_data={key: json_str})
+                    api.patch_namespaced_secret(name=self._secret_name, namespace=self._namespace, body=patch_body)
+
+                logger.debug("Token stored to K8s Secret %s (provider=%s, user_id=%s)", self._secret_name, provider_name, user_id)
+                return True
+            except Exception:
+                logger.warning("Failed to store token in K8s Secret %s", self._secret_name, exc_info=True)
+                return False
+
+    def delete_token(self, provider_name: str, user_id: Optional[str] = None) -> bool:
+        key = self._format_key(provider_name, user_id)
+        api = self._get_api()
+        with self._lock:
+            try:
+                try:
+                    secret = api.read_namespaced_secret(self._secret_name, self._namespace)
+                except ApiException as e:
+                    if e.status == 404:
+                        return False
+                    raise
+
+                data = secret.data or {}
+                string_data = secret.string_data or {}
+                if key not in data and key not in string_data:
+                    return False
+
+                if key in data:
+                    del data[key]
+                if key in string_data:
+                    del string_data[key]
+                secret.data = data
+                secret.string_data = string_data
+                api.replace_namespaced_secret(name=self._secret_name, namespace=self._namespace, body=secret)
+                return True
+            except Exception:
+                logger.warning("Failed to delete token from K8s Secret %s", self._secret_name, exc_info=True)
+                return False
+
+    def get_all_for_preload(self) -> List[Dict[str, Any]]:
+        api = self._get_api()
+        try:
+            try:
+                secret = api.read_namespaced_secret(self._secret_name, self._namespace)
+            except ApiException as e:
+                if e.status == 404:
+                    return []
+                raise
+        except Exception:
+            logger.warning("Failed to read K8s Secret %s for preload", self._secret_name, exc_info=True)
+            return []
+
+        secret_dict: Dict[str, Any] = {}
+        if getattr(secret, "data", None):
+            secret_dict.update(secret.data)
+        if getattr(secret, "string_data", None):
+            secret_dict.update(secret.string_data)
+
+        results: List[Dict[str, Any]] = []
+        for key, raw_val in secret_dict.items():
+            token_data = self._decode_token_value(raw_val)
+            if not token_data or not token_data.get("access_token"):
+                continue
+
+            provider_name = token_data.get("provider_name")
+            user_id = token_data.get("user_id")
+            if not provider_name:
+                parts = key.split("__", 1)
+                provider_name = parts[0]
+                if not user_id and len(parts) > 1:
+                    user_id = parts[1]
+
+            results.append({
+                "provider_name": provider_name or "",
+                "user_id": user_id,
+                "token_data": token_data,
+                "token_expiry": token_data.get("token_expiry"),
+            })
+        return results
+

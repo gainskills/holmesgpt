@@ -17,6 +17,7 @@ from holmes.common.env_vars import DEFAULT_CLI_USER
 from holmes.plugins.toolsets.mcp.oauth_token_store import (
     DalTokenStore,
     DiskTokenStore,
+    K8sSecretTokenStore,
     OAuthTokenCache,
     TokenStore,
 )
@@ -65,10 +66,13 @@ class OAuthTokenManager:
         self._store = DiskTokenStore()
 
     def set_dal(self, dal: Any) -> None:
-        """Switch to DB-backed storage. Called during server startup."""
-        if dal and dal.enabled:
+        """Switch to DB-backed or K8s Secret storage. Called during server startup."""
+        if dal and getattr(dal, "enabled", False):
             self._store = DalTokenStore(dal)
-            logger.info("OAuthTokenManager: DAL initialized for cross-cluster token storage")
+            logger.info("OAuthTokenManager: DAL initialized for cross-cluster token storage (Robusta SaaS)")
+        elif os.environ.get("KUBERNETES_SERVICE_HOST"):
+            self._store = K8sSecretTokenStore()
+            logger.info("OAuthTokenManager: using K8sSecretTokenStore for standalone Kubernetes")
 
     # ── Preload ────────────────────────────────────────────────────────
 
@@ -135,10 +139,8 @@ class OAuthTokenManager:
     ) -> Optional[str]:
         """Return a valid access token, checking cache → refresh → persistent store.
 
-        A user_id must be present on request_context. CLI callers must pass
-        DEFAULT_CLI_USER explicitly; the server must pass the authenticated
-        user. Without a user_id the cache cannot be safely keyed, so we
-        refuse to serve any token (mirrors DalTokenStore.get_token's guard).
+        If user_id is absent from request_context, falls back to DEFAULT_CLUSTER_USER
+        for cluster-level execution.
 
         Returns None if no token is available anywhere (caller should initiate OAuth flow).
         """
@@ -146,7 +148,8 @@ class OAuthTokenManager:
         if not user_id:
             return None
 
-        cache_key = self._build_cache_key(user_id, oauth_config.authorization_url)
+        provider_id = self._get_provider_id(oauth_config, disk_key)
+        cache_key = self._build_cache_key(user_id, provider_id)
         requested_resource = getattr(oauth_config, "resource", None)
 
         # 1. Check in-memory cache. Serve a hit only if the token was issued for
@@ -171,7 +174,7 @@ class OAuthTokenManager:
         # 3. Check persistent store — same audience check as the cache
         if not self._store:
             return None
-        provider_name = oauth_config.authorization_url or (disk_key or "unknown")
+        provider_name = provider_id
         stored_token = self._store.get_token(provider_name, user_id=user_id, provider_aliases=provider_aliases)
         if stored_token and stored_token.get("access_token"):
             stored_resource = stored_token.get("resource")
@@ -187,13 +190,13 @@ class OAuthTokenManager:
                 expires_in=stored_token.get("_remaining_ttl", stored_token.get("expires_in", 300)),
                 refresh_token=stored_token.get("refresh_token"),
                 refresh_expires_in=stored_token.get("refresh_expires_in"),
-                token_url=stored_token.get("token_url", oauth_config.token_url),
-                client_id=stored_token.get("client_id", oauth_config.client_id),
-                authorization_url=oauth_config.authorization_url,
+                token_url=stored_token.get("token_url", getattr(oauth_config, "token_url", None)),
+                client_id=stored_token.get("client_id", getattr(oauth_config, "client_id", None)),
+                authorization_url=provider_id,
                 user_id=user_id,
                 resource=stored_token.get("resource", requested_resource),
             )
-            logger.debug("OAuthTokenManager: loaded token from store (provider=%s)", oauth_config.authorization_url)
+            logger.debug("OAuthTokenManager: loaded token from store (provider=%s)", provider_id)
             return stored_token["access_token"]
 
         return None
@@ -221,7 +224,8 @@ class OAuthTokenManager:
         user_id = _get_user_id(request_context)
         if not user_id:
             return False
-        cache_key = self._build_cache_key(user_id, oauth_config.authorization_url)
+        provider_id = self._get_provider_id(oauth_config)
+        cache_key = self._build_cache_key(user_id, provider_id)
         return self._cache.has_token_or_refresh(cache_key)
 
     def store_token(
@@ -238,7 +242,8 @@ class OAuthTokenManager:
             logger.warning("OAuthTokenManager: refusing to store token without a user_id")
             return
 
-        cache_key = self._build_cache_key(user_id, oauth_config.authorization_url)
+        provider_id = self._get_provider_id(oauth_config, disk_key)
+        cache_key = self._build_cache_key(user_id, provider_id)
         access_token = token_data.get("access_token")
         if not access_token:
             logger.warning("OAuthTokenManager: store_token called with no access_token")
@@ -256,20 +261,20 @@ class OAuthTokenManager:
             expires_in=expires_in,
             refresh_token=token_data.get("refresh_token"),
             refresh_expires_in=token_data.get("refresh_expires_in"),
-            token_url=oauth_config.token_url,
-            client_id=oauth_config.client_id,
-            authorization_url=oauth_config.authorization_url,
+            token_url=getattr(oauth_config, "token_url", None),
+            client_id=getattr(oauth_config, "client_id", None),
+            authorization_url=provider_id,
             user_id=user_id,
             resource=resource,
         )
 
         if self._store:
             self._store.store_token(
-                oauth_config.authorization_url or "unknown",
+                provider_id,
                 token_data,
                 user_id=user_id,
-                token_url=oauth_config.token_url,
-                client_id=oauth_config.client_id,
+                token_url=getattr(oauth_config, "token_url", None),
+                client_id=getattr(oauth_config, "client_id", None),
                 resource=resource,
             )
 
@@ -279,13 +284,7 @@ class OAuthTokenManager:
         )
 
     def require_user_id(self, request_context: Optional[Dict[str, Any]]) -> str:
-        """Return the user_id from request_context, or raise if absent.
-
-        Callers (CLI, server, conversation worker) are responsible for putting
-        a real user_id on request_context — CLI uses DEFAULT_CLI_USER, server
-        uses the authenticated user. Missing user_id is a programming error
-        (would silently corrupt downstream per-user storage), so we fail fast.
-        """
+        """Return the user_id from request_context, or DEFAULT_CLUSTER_USER if absent."""
         user_id = _get_user_id(request_context)
         if not user_id:
             raise ValueError("OAuthTokenManager: user_id is required in request_context")
@@ -308,7 +307,8 @@ class OAuthTokenManager:
 
     def get_cached_user_ids(self, oauth_config: Any) -> list[str]:
         """Return user_ids that have cached tokens for this OAuth provider."""
-        idp_key = hashlib.sha256((oauth_config.authorization_url or "").encode()).hexdigest()[:12]
+        provider_id = self._get_provider_id(oauth_config)
+        idp_key = hashlib.sha256(provider_id.encode()).hexdigest()[:12]
         user_ids = []
         with self._cache._lock:
             for cache_key in self._cache._cache:
@@ -417,12 +417,13 @@ class OAuthTokenManager:
 
             token_data, access_token, expires_in = result
             if self._store:
+                provider_id = self._get_provider_id(oauth_config)
                 self._store.store_token(
-                    oauth_config.authorization_url or "unknown",
+                    provider_id,
                     token_data,
                     user_id=user_id,
-                    token_url=oauth_config.token_url,
-                    client_id=oauth_config.client_id,
+                    token_url=getattr(oauth_config, "token_url", None),
+                    client_id=getattr(oauth_config, "client_id", None),
                     resource=resource,
                 )
             return access_token
@@ -480,34 +481,46 @@ class OAuthTokenManager:
 
     # ── Key helpers ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _get_provider_id(oauth_config: Any, fallback: Optional[str] = None) -> str:
+        """Resolve the provider identifier from oauth_config, falling back to token_url, fallback, or 'unknown'."""
+        return (
+            getattr(oauth_config, "authorization_url", None)
+            or getattr(oauth_config, "token_url", None)
+            or fallback
+            or "unknown"
+        )
+
     def _get_cache_key(self, oauth_config: Any, request_context: Optional[Dict[str, Any]]) -> str:
-        """Build a cache key from request_context. Raises if user_id is missing —
-        callers must put a user_id on the context (DEFAULT_CLI_USER in CLI mode,
-        authenticated user in server mode)."""
+        """Build a cache key from request_context, falling back to DEFAULT_CLUSTER_USER when user_id is absent."""
         user_id = _get_user_id(request_context)
         if not user_id:
             raise ValueError("OAuthTokenManager: user_id is required in request_context")
-        return self._build_cache_key(user_id, oauth_config.authorization_url)
+        provider_id = self._get_provider_id(oauth_config)
+        return self._build_cache_key(user_id, provider_id)
 
     @staticmethod
-    def _build_cache_key(user_id: str, authorization_url: str) -> str:
-        """Build a cache key from user_id and authorization_url."""
-        idp_key = hashlib.sha256((authorization_url or "").encode()).hexdigest()[:12]
+    def _build_cache_key(user_id: str, provider_id: str) -> str:
+        """Build a cache key from user_id and provider_id (authorization_url or token_url)."""
+        idp_key = hashlib.sha256((provider_id or "").encode()).hexdigest()[:12]
         return f"{user_id}:{idp_key}"
 
-    @staticmethod
-    def _default_disk_key(oauth_config: Any) -> str:
+    @classmethod
+    def _default_disk_key(cls, oauth_config: Any) -> str:
         """Derive a disk store key from the oauth config."""
-        return oauth_config.authorization_url or "unknown"
+        return cls._get_provider_id(oauth_config)
 
 
 # ── Module-level helpers ──────────────────────────────────────────────────
 
 
-def _get_user_id(request_context: Optional[Dict[str, Any]]) -> Optional[str]:
-    """Extract user_id from request context."""
-    if request_context:
-        return request_context.get("user_id")
-    return None
+DEFAULT_CLUSTER_USER = "cluster_user"
+
+
+def _get_user_id(request_context: Optional[Dict[str, Any]]) -> str:
+    """Extract user_id from request context, falling back to DEFAULT_CLUSTER_USER."""
+    if request_context and request_context.get("user_id"):
+        return request_context["user_id"]
+    return DEFAULT_CLUSTER_USER
 
 

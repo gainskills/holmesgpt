@@ -21,6 +21,7 @@ def get_toolset_oauth_config(
     toolset_name: str,
     token_manager: Any,
     client_id_override: Optional[str] = None,
+    state: Optional[str] = None,
 ) -> tuple:
     """Look up a toolset's OAuth config from a list of toolsets.
 
@@ -34,6 +35,18 @@ def get_toolset_oauth_config(
             break
 
     if not toolset:
+        from holmes.core.oauth_config import _get_exchange_manager
+        exchange_mgr = _get_exchange_manager()
+        pending = None
+        with exchange_mgr._lock:
+            if state and state in exchange_mgr._pending:
+                pending = exchange_mgr._pending[state]
+            elif toolset_name in exchange_mgr._pending:
+                pending = exchange_mgr._pending[toolset_name]
+        if pending:
+            oauth = pending.oauth_config
+            client_id = client_id_override or oauth.client_id
+            return oauth, client_id, token_manager, None
         raise OAuthConfigLookupError(f"Toolset '{toolset_name}' not found")
 
     if not toolset.is_oauth_enabled:
@@ -63,7 +76,7 @@ def process_oauth_callback(
     subsequent requests skip the _connect placeholder.
     """
     oauth, client_id, mgr, toolset = get_toolset_oauth_config(
-        toolsets, request.toolset_name, token_manager, request.client_id,
+        toolsets, request.toolset_name, token_manager, request.client_id, state=request.state,
     )
 
     # Use DCR client_id from frontend for this exchange without mutating the
