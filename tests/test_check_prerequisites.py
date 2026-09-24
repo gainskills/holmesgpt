@@ -4,7 +4,6 @@ import subprocess
 from typing import Dict, List
 from unittest.mock import Mock, call, patch
 
-
 from holmes.core.tools import (
     CallablePrerequisite,
     StaticPrerequisite,

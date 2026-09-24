@@ -198,7 +198,9 @@ SCHEDULED_PROMPTS_HEARTBEAT_INTERVAL_SECONDS = int(
 # TodoWrite planning phase back on for scheduled prompts. Note the report then
 # risks ending up in conversation_history behind a trailing TodoWrite call
 # rather than in ChatResponse.analysis.
-ENABLE_SCHEDULED_PROMPTS_FAST_MODE = load_bool("ENABLE_SCHEDULED_PROMPTS_FAST_MODE", True)
+ENABLE_SCHEDULED_PROMPTS_FAST_MODE = load_bool(
+    "ENABLE_SCHEDULED_PROMPTS_FAST_MODE", True
+)
 # for embedds
 ROBUSTA_UI_DOMAIN = os.environ.get(
     "ROBUSTA_UI_DOMAIN",
@@ -288,9 +290,7 @@ CONVERSATION_WORKER_USE_REALTIME_BROADCAST = load_bool(
 # due to connectivity issues. The verifier doubles this on each retry up
 # to CONVERSATION_WORKER_REALTIME_VERIFY_MAX_BACKOFF_SECONDS.
 CONVERSATION_WORKER_REALTIME_VERIFY_INITIAL_BACKOFF_SECONDS = float(
-    os.environ.get(
-        "CONVERSATION_WORKER_REALTIME_VERIFY_INITIAL_BACKOFF_SECONDS", 5.0
-    )
+    os.environ.get("CONVERSATION_WORKER_REALTIME_VERIFY_INITIAL_BACKOFF_SECONDS", 5.0)
 )
 CONVERSATION_WORKER_REALTIME_VERIFY_MAX_BACKOFF_SECONDS = float(
     os.environ.get("CONVERSATION_WORKER_REALTIME_VERIFY_MAX_BACKOFF_SECONDS", 120.0)

@@ -16,6 +16,7 @@ These tests assert the integration without re-testing the recorder itself
    (``conversation_source='conversations'``, ``request_type='user_chat'``,
    etc.) so dashboards can attribute these rows correctly.
 """
+
 import threading
 from unittest.mock import MagicMock, patch
 
@@ -76,11 +77,12 @@ def _chat_request():
     )
 
 
-def _run(worker, ai, task=None, chat_request=None):
+def _run(worker, ai, task=None, chat_request=None, consume_side_effect=None):
     """Drive _run_chat_and_publish with all heavy collaborators mocked.
 
     Returns the captured (raw_stream, recorder_state, wrapped_stream) so
-    individual tests can assert on each.
+    individual tests can assert on each. `consume_side_effect` is what the
+    publisher raises while consuming the stream, for the failure branches.
     """
     raw_stream = iter(["raw-event-1", "raw-event-2"])
     wrapped_stream_sentinel = object()
@@ -94,7 +96,10 @@ def _run(worker, ai, task=None, chat_request=None):
     # consume returns ANSWER_END so the worker doesn't take the failed-conversation
     # branch and try to call _fail_conversation.
     from holmes.utils.stream import StreamEvents
-    publisher.consume = MagicMock(return_value=StreamEvents.ANSWER_END)
+
+    publisher.consume = MagicMock(
+        return_value=StreamEvents.ANSWER_END, side_effect=consume_side_effect
+    )
 
     captured = {}
     with patch(
@@ -200,6 +205,7 @@ def test_recorder_state_uses_workers_dal_and_streaming_flag():
 # reintroduce the NULL-row bug or the event-first precedence.
 # --------------------------------------------------------------------------
 
+
 def _capture_chat_request_from_process(task, user_message_data):
     """Drive _process_conversation just far enough to capture the
     ChatRequest it constructs. Patches _run_chat_and_publish so the
@@ -250,8 +256,9 @@ def _process_and_capture(task, user_message_data):
     def capture(self, t, chat_request, publisher, resume_only=False):
         captured["chat_request"] = chat_request
 
-    with patch.object(ConversationWorker, "_run_chat_and_publish", capture), \
-            patch.object(ConversationWorker, "_fail_conversation") as fail:
+    with patch.object(
+        ConversationWorker, "_run_chat_and_publish", capture
+    ), patch.object(ConversationWorker, "_fail_conversation") as fail:
         worker._process_conversation(task)
 
     return captured.get("chat_request"), fail
@@ -285,7 +292,9 @@ def test_event_user_id_mismatch_rejected_when_row_has_no_owner():
     # Shared / automated conversations (user_id NULL on the row, e.g.
     # triggered workflows) must not be upgraded to a named user by whoever
     # posts the follow-up.
-    cr, fail = _process_and_capture(_task(user_id=None), {"ask": "q", "user_id": "u-victim"})
+    cr, fail = _process_and_capture(
+        _task(user_id=None), {"ask": "q", "user_id": "u-victim"}
+    )
     assert cr is None
     fail.assert_called_once()
 
@@ -323,19 +332,36 @@ def test_no_owner_and_no_event_user_id_runs_unattributed():
 
 def test_spoofed_user_id_on_tool_decision_resume_is_rejected():
     worker, _ = _bare_worker()
-    worker.dal.get_conversation_events = MagicMock(return_value=[
-        {"event": "user_message", "data": {"ask": "first"}, "ts": "1"},
-        {"event": "approval_required", "ts": "2", "data": {"messages": [
-            {"role": "user", "content": "first"},
-            {"role": "assistant", "content": None, "tool_calls": [{"id": "t1"}]},
-        ]}},
-        {"event": "user_message", "ts": "3", "data": {
-            "tool_decisions": [{"tool_call_id": "t1", "approved": True}],
-            "user_id": "u-victim",
-        }},
-    ])
-    with patch.object(ConversationWorker, "_run_chat_and_publish") as run, \
-            patch.object(ConversationWorker, "_fail_conversation") as fail:
+    worker.dal.get_conversation_events = MagicMock(
+        return_value=[
+            {"event": "user_message", "data": {"ask": "first"}, "ts": "1"},
+            {
+                "event": "approval_required",
+                "ts": "2",
+                "data": {
+                    "messages": [
+                        {"role": "user", "content": "first"},
+                        {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{"id": "t1"}],
+                        },
+                    ]
+                },
+            },
+            {
+                "event": "user_message",
+                "ts": "3",
+                "data": {
+                    "tool_decisions": [{"tool_call_id": "t1", "approved": True}],
+                    "user_id": "u-victim",
+                },
+            },
+        ]
+    )
+    with patch.object(ConversationWorker, "_run_chat_and_publish") as run, patch.object(
+        ConversationWorker, "_fail_conversation"
+    ) as fail:
         worker._process_conversation(_task())
     run.assert_not_called()
     fail.assert_called_once()
@@ -344,7 +370,13 @@ def test_spoofed_user_id_on_tool_decision_resume_is_rejected():
 def test_mismatch_posts_error_event_and_marks_failed():
     worker, _ = _bare_worker()
     worker.dal.get_conversation_events = MagicMock(
-        return_value=[{"event": "user_message", "data": {"ask": "q", "user_id": "u-victim"}, "ts": "1"}]
+        return_value=[
+            {
+                "event": "user_message",
+                "data": {"ask": "q", "user_id": "u-victim"},
+                "ts": "1",
+            }
+        ]
     )
     with patch.object(ConversationWorker, "_run_chat_and_publish") as run:
         worker._process_conversation(_task())
@@ -352,7 +384,10 @@ def test_mismatch_posts_error_event_and_marks_failed():
     posted = worker.dal.post_conversation_events.call_args
     assert posted is not None
     events = posted.kwargs.get("events") or posted.args[-1]
-    assert any(e.get("event") == "error" and "owner" in e["data"]["description"] for e in events)
+    assert any(
+        e.get("event") == "error" and "owner" in e["data"]["description"]
+        for e in events
+    )
     status_call = worker.dal.update_conversation_status.call_args
     assert status_call.kwargs.get("status") == "failed"
 
@@ -368,8 +403,13 @@ def test_metadata_oauth_enabled_false_drops_user_id():
 def test_request_context_carries_owner_when_oauth_opt_out_drops_user_id():
     worker, ai = _bare_worker()
     task = ConversationTask(
-        conversation_id="c1", account_id="a1", cluster_id="cl1", origin="chat",
-        request_sequence=1, user_id="u-owner", metadata={"oauth_enabled": False},
+        conversation_id="c1",
+        account_id="a1",
+        cluster_id="cl1",
+        origin="chat",
+        request_sequence=1,
+        user_id="u-owner",
+        metadata={"oauth_enabled": False},
     )
     cr = _chat_request()
     cr.user_id = None
@@ -382,8 +422,12 @@ def test_request_context_carries_owner_when_oauth_opt_out_drops_user_id():
 def test_request_context_carries_owner_and_user_id_normally():
     worker, ai = _bare_worker()
     task = ConversationTask(
-        conversation_id="c1", account_id="a1", cluster_id="cl1", origin="chat",
-        request_sequence=1, user_id="u-1",
+        conversation_id="c1",
+        account_id="a1",
+        cluster_id="cl1",
+        origin="chat",
+        request_sequence=1,
+        user_id="u-1",
     )
     captured = _run(worker, ai, task=task)
     ctx = captured["call_stream_call"].kwargs["request_context"]
@@ -518,8 +562,7 @@ def test_slack_prefix_in_event_ask_routes_to_slack_chat_via_helper():
         request_sequence=1,
     )
     slack_ask = (
-        "**@user_U0AKMP2CZ97** • 2026-05-04T05:10:04Z\n\n"
-        "high cpu in pod alert"
+        "**@user_U0AKMP2CZ97** • 2026-05-04T05:10:04Z\n\n" "high cpu in pod alert"
     )
     cr = _capture_chat_request_from_process(task, {"ask": slack_ask})
     assert cr is not None
@@ -609,3 +652,26 @@ def test_event_conversation_link_is_ignored():
     )
     assert cr is not None
     assert cr.conversation_link == "https://acme.slack.com/archives/C1/p123"
+
+
+def test_a_relay_refusal_fails_the_conversation_with_its_own_code():
+    """The platform refusing the call on a Robusta-hosted model surfaces while
+    the stream is consumed. The error event carries relay's sentence and the
+    refusal's code, so the client can tell it from a crash (ROB-1389)."""
+    from holmes.core.relay_refusal import RELAY_REFUSAL_ERROR_CODES, RelayRefusal
+
+    w, ai = _bare_worker()
+    ai.llm.is_robusta_model = True
+    message = "Robusta-hosted models are disabled for this account."
+
+    _run(w, ai, consume_side_effect=RelayRefusal(message, 403))
+
+    w.dal.post_conversation_events.assert_called_once()
+    event = w.dal.post_conversation_events.call_args[1]["events"][0]
+    assert event["event"] == "error"
+    assert event["data"]["error_code"] == RELAY_REFUSAL_ERROR_CODES[403]
+    assert event["data"]["description"] == message
+    assert event["data"]["raw_error"] == message
+    w.dal.update_conversation_status.assert_called_once_with(
+        conversation_id="c1", request_sequence=1, assignee="h-test", status="failed"
+    )

@@ -26,9 +26,6 @@ from typing import (
 )
 
 from jinja2 import Template
-
-from holmes.core.json_schema_coerce import coerce_params
-from requests.structures import CaseInsensitiveDict
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -37,9 +34,11 @@ from pydantic import (
     PrivateAttr,
     model_validator,
 )
+from requests.structures import CaseInsensitiveDict
 from rich.console import Console
 from rich.table import Table
 
+from holmes.core.json_schema_coerce import coerce_params
 from holmes.core.llm import LLM
 from holmes.core.openai_formatting import format_tool_to_open_ai_standard
 from holmes.core.transformers import (
@@ -129,7 +128,9 @@ class StructuredToolResult(BaseModel):
                 return self.data.model_dump_json(indent=None if compact else 2), True
             else:
                 if compact:
-                    return json.dumps(self.data, separators=(",", ":"), ensure_ascii=False), True
+                    return json.dumps(
+                        self.data, separators=(",", ":"), ensure_ascii=False
+                    ), True
                 else:
                     return json.dumps(self.data, indent=2, ensure_ascii=False), True
         except Exception:
@@ -159,6 +160,35 @@ def sanitize(param):
 
 def sanitize_params(params):
     return {k: sanitize(str(v)) for k, v in params.items()}
+
+
+class ShellInjectionError(ValueError):
+    """Raised when an untrusted value would inject shell syntax into a command."""
+
+
+# Characters that can start a subshell/command substitution, break out of a
+# quote, or trigger word-splitting/globbing once interpolated into a shell
+# command. request_context values are attacker controlled (arbitrary HTTP
+# headers, unauthenticated by default) and reach a /bin/bash sink, so we reject
+# any value containing these. Rejecting (rather than shlex.quote'ing) is what
+# makes the value inert regardless of how the tool template quotes it: the
+# documented `-H "X-Token: {{ ... }}"` pattern nests the value inside double
+# quotes, where `$(...)`/backticks still execute and shlex.quote's single-quote
+# wrapping would only be inserted as literal characters. Legitimate tokens
+# (JWTs, API keys, tenant ids, `Bearer <token>`) contain none of these, so
+# permitted values render exactly as they did before this fix. See ROB-1104.
+_SHELL_METACHARACTERS = frozenset("`$\\\"'();|&<>*?[]{}\n\r")
+
+
+def reject_shell_metacharacters(value: str, source: str) -> str:
+    found = sorted({c for c in value if c in _SHELL_METACHARACTERS})
+    if found:
+        raise ShellInjectionError(
+            f"{source} contains disallowed shell metacharacter(s) "
+            f"{''.join(found)!r}; refusing to run it in a shell command. "
+            f"Disallowed: {''.join(sorted(_SHELL_METACHARACTERS))!r}"
+        )
+    return value
 
 
 class PrerequisiteCacheMode(str, Enum):
@@ -203,7 +233,9 @@ class ToolParameter(BaseModel):
     required: bool = True
     properties: Optional[Dict[str, "ToolParameter"]] = None  # For object types
     items: Optional["ToolParameter"] = None  # For array item schemas
-    enum: Optional[List[Any]] = None  # For restricting to specific values (JSON Schema allows any type)
+    enum: Optional[List[Any]] = (
+        None  # For restricting to specific values (JSON Schema allows any type)
+    )
     # For object types: stores the additionalProperties JSON Schema value.
     # None = not specified, False = no additional properties allowed,
     # dict = schema for dynamic key-value maps (e.g. Dict[str, str])
@@ -226,7 +258,10 @@ class ToolParameter(BaseModel):
         are incompatible with strict mode.
         """
         # If this parameter has additionalProperties with a schema or True, it's not strict-compatible
-        if self.additional_properties is not None and self.additional_properties is not False:
+        if (
+            self.additional_properties is not None
+            and self.additional_properties is not False
+        ):
             return False
         # Recursively check nested properties
         if self.properties:
@@ -573,8 +608,26 @@ class YAMLTool(Tool, BaseModel):
         context: Dict[str, Any] = {**params}
         context["env"] = os.environ
         if request_context:
-            ctx_copy = dict(request_context)
-            ctx_copy["headers"] = CaseInsensitiveDict(ctx_copy.get("headers") or {})
+            # request_context (propagated HTTP headers, user_id, ...) is attacker
+            # controlled and reaches the same /bin/bash sink as tool params, but
+            # unlike params it is never something the tool author designed for.
+            # Reject shell metacharacters outright; permitted values are passed
+            # through unchanged so legitimate tokens render exactly as before
+            # this fix, in whatever quoting the template uses (ROB-1104).
+            def _clean(value: Any, source: str) -> Any:
+                if not isinstance(value, str):
+                    return value
+                return reject_shell_metacharacters(value, source)
+
+            ctx_copy = {
+                k: _clean(v, f"request_context.{k}") for k, v in request_context.items()
+            }
+            ctx_copy["headers"] = CaseInsensitiveDict(
+                {
+                    k: _clean(v, f"request header {k!r}")
+                    for k, v in (request_context.get("headers") or {}).items()
+                }
+            )
             context["request_context"] = ctx_copy
         else:
             context["request_context"] = {"headers": CaseInsensitiveDict()}
@@ -594,13 +647,20 @@ class YAMLTool(Tool, BaseModel):
         params: dict,
         context: ToolInvokeContext,
     ) -> StructuredToolResult:
-        if self.command is not None:
-            raw_output, return_code, invocation = self.__invoke_command(
-                params, context.request_context
-            )
-        else:
-            raw_output, return_code, invocation = self.__invoke_script(
-                params, context.request_context
+        try:
+            if self.command is not None:
+                raw_output, return_code, invocation = self.__invoke_command(
+                    params, context.request_context
+                )
+            else:
+                raw_output, return_code, invocation = self.__invoke_script(
+                    params, context.request_context
+                )
+        except ShellInjectionError as e:
+            return StructuredToolResult(
+                status=StructuredToolResultStatus.ERROR,
+                error=str(e),
+                params=params,
             )
 
         error = (
@@ -703,7 +763,14 @@ class ToolsetEnvironmentPrerequisite(BaseModel):
     env: List[str] = []  # optional
 
 
-def _prereq_priority(prereq: Union[StaticPrerequisite, ToolsetCommandPrerequisite, ToolsetEnvironmentPrerequisite, CallablePrerequisite]) -> int:
+def _prereq_priority(
+    prereq: Union[
+        StaticPrerequisite,
+        ToolsetCommandPrerequisite,
+        ToolsetEnvironmentPrerequisite,
+        CallablePrerequisite,
+    ],
+) -> int:
     """Priority ordering for prerequisite checks. Lower number = higher priority.
 
     Static checks and env vars are fast config-validity checks (0-1).
@@ -761,6 +828,7 @@ class Toolset(BaseModel):
             "this cluster (kubectl, in-cluster prometheus, ...)."
         ),
     )
+
     def remote_exposure_default(
         self, instance_config: Optional[Dict[str, Any]] = None
     ) -> Optional[bool]:
@@ -998,9 +1066,7 @@ class Toolset(BaseModel):
                     local_status = ToolsetStatusEnum.FAILED
                     stderr = (e.stderr or "").strip()
                     detail = f": {stderr}" if stderr else ""
-                    local_error = (
-                        f"`{prereq.command}` failed with exit code {e.returncode}{detail}"
-                    )
+                    local_error = f"`{prereq.command}` failed with exit code {e.returncode}{detail}"
 
             elif isinstance(prereq, ToolsetEnvironmentPrerequisite):
                 for env_var in prereq.env:

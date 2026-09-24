@@ -36,7 +36,11 @@ from holmes.core.prompt import (
 )
 from holmes.core.resource_instruction import ResourceInstructionDocument
 from holmes.core.tool_calling_llm import LLMResult, ToolCallingLLM
-from holmes.core.tools import PrerequisiteCacheMode, ToolsetTag, pretty_print_toolset_status
+from holmes.core.tools import (
+    PrerequisiteCacheMode,
+    ToolsetTag,
+    pretty_print_toolset_status,
+)
 from holmes.core.tools_utils.filesystem_result_storage import tool_result_storage
 from holmes.common.env_vars import DEFAULT_CLI_USER
 from holmes.core.oauth_utils import enable_disk_token_store
@@ -46,7 +50,11 @@ from holmes.core.oauth_utils import enable_disk_token_store
 # guess whether a missing user_id means "CLI" or "buggy server caller".
 _CLI_REQUEST_CONTEXT = {"user_id": DEFAULT_CLI_USER}
 from holmes.core.tracing import SpanType, TracingFactory
-from holmes.interactive import InitProgressRenderer, run_interactive_loop, silence_display_loggers
+from holmes.interactive import (
+    InitProgressRenderer,
+    run_interactive_loop,
+    silence_display_loggers,
+)
 from holmes.plugins.destinations import DestinationType
 from holmes.plugins.interfaces import Issue
 from holmes.plugins.prompts import load_and_render_prompt
@@ -64,7 +72,6 @@ from holmes.common.cli_commons import (
 from holmes.toolset_config_tui import run_toolset_config_tui
 
 app = typer.Typer(add_completion=False, pretty_exceptions_show_locals=False)
-
 
 
 investigate_app = typer.Typer(
@@ -371,7 +378,9 @@ def ask(
         ai = config.create_toolcalling_llm(
             toolset_tag_filter=[ToolsetTag.CORE, ToolsetTag.CLI],
             enable_all_toolsets_possible=True,
-            prerequisite_cache=PrerequisiteCacheMode.FORCE_REFRESH if refresh_toolsets else PrerequisiteCacheMode.ENABLED,
+            prerequisite_cache=PrerequisiteCacheMode.FORCE_REFRESH
+            if refresh_toolsets
+            else PrerequisiteCacheMode.ENABLED,
             tracer=tracer,
             model=model,
             tool_results_dir=tool_results_dir,
@@ -419,7 +428,9 @@ def ask(
             f'holmes ask "{prompt}"', span_type=SpanType.TASK
         ) as trace_span:
             trace_span.log(input=prompt, metadata={"type": "user_question"})
-            response = ai.call(messages, trace_span=trace_span, request_context=_CLI_REQUEST_CONTEXT)
+            response = ai.call(
+                messages, trace_span=trace_span, request_context=_CLI_REQUEST_CONTEXT
+            )
             trace_span.log(
                 output=response.result,
             )
@@ -480,7 +491,6 @@ def alertmanager(
     model: Optional[str] = opt_model,
     config_file: Optional[Path] = opt_config_file,  # type: ignore
     custom_toolsets: Optional[List[Path]] = opt_custom_toolsets,
-
     max_steps: Optional[int] = opt_max_steps,
     verbose: Optional[List[bool]] = opt_verbose,
     # advanced options for this command
@@ -613,7 +623,6 @@ def jira(
     model: Optional[str] = opt_model,
     config_file: Optional[Path] = opt_config_file,  # type: ignore
     custom_toolsets: Optional[List[Path]] = opt_custom_toolsets,
-
     max_steps: Optional[int] = opt_max_steps,
     verbose: Optional[List[bool]] = opt_verbose,
     json_output_file: Optional[str] = opt_json_output_file,
@@ -661,7 +670,9 @@ def jira(
 
             console.print(Rule())
             console.print(f"[bold green]AI analysis of {issue.url}[/bold green]")
-            console.print(Markdown(result.result.replace("\n", "\n\n")), style="bold green")  # type: ignore
+            console.print(
+                Markdown(result.result.replace("\n", "\n\n")), style="bold green"
+            )  # type: ignore
             console.print(Rule())
             if update:
                 source.write_back_result(issue.id, result)
@@ -827,7 +838,6 @@ def github(
     model: Optional[str] = opt_model,
     config_file: Optional[Path] = opt_config_file,  # type: ignore
     custom_toolsets: Optional[List[Path]] = opt_custom_toolsets,
-
     max_steps: Optional[int] = opt_max_steps,
     verbose: Optional[List[bool]] = opt_verbose,
 ):
@@ -874,7 +884,9 @@ def github(
 
             console.print(Rule())
             console.print(f"[bold green]AI analysis of {issue.url}[/bold green]")
-            console.print(Markdown(result.result.replace("\n", "\n\n")), style="bold green")  # type: ignore
+            console.print(
+                Markdown(result.result.replace("\n", "\n\n")), style="bold green"
+            )  # type: ignore
             console.print(Rule())
             if update:
                 source.write_back_result(issue.id, result)
@@ -907,7 +919,6 @@ def pagerduty(
     model: Optional[str] = opt_model,
     config_file: Optional[Path] = opt_config_file,  # type: ignore
     custom_toolsets: Optional[List[Path]] = opt_custom_toolsets,
-
     max_steps: Optional[int] = opt_max_steps,
     verbose: Optional[List[bool]] = opt_verbose,
     json_output_file: Optional[str] = opt_json_output_file,
@@ -955,7 +966,9 @@ def pagerduty(
 
             console.print(Rule())
             console.print(f"[bold green]AI analysis of {issue.url}[/bold green]")
-            console.print(Markdown(result.result.replace("\n", "\n\n")), style="bold green")  # type: ignore
+            console.print(
+                Markdown(result.result.replace("\n", "\n\n")), style="bold green"
+            )  # type: ignore
             console.print(Rule())
             if update:
                 source.write_back_result(issue.id, result)
@@ -988,7 +1001,6 @@ def opsgenie(
     model: Optional[str] = opt_model,
     config_file: Optional[Path] = opt_config_file,  # type: ignore
     custom_toolsets: Optional[List[Path]] = opt_custom_toolsets,
-
     max_steps: Optional[int] = opt_max_steps,
     verbose: Optional[List[bool]] = opt_verbose,
     documents: Optional[str] = opt_documents,
@@ -1033,7 +1045,9 @@ def opsgenie(
 
             console.print(Rule())
             console.print(f"[bold green]AI analysis of {issue.url}[/bold green]")
-            console.print(Markdown(result.result.replace("\n", "\n\n")), style="bold green")  # type: ignore
+            console.print(
+                Markdown(result.result.replace("\n", "\n\n")), style="bold green"
+            )  # type: ignore
             console.print(Rule())
             if update:
                 source.write_back_result(issue.id, result)

@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from holmes.plugins.sources.pagerduty import PagerDutySource
     from holmes.plugins.sources.prometheus.plugin import AlertManagerSource
 
+
 display_logger = logging.getLogger("holmes.display.config")
 
 DEFAULT_CONFIG_LOCATION = os.path.join(config_path_dir, "config.yaml")
@@ -934,7 +935,12 @@ class SourceFactory(BaseModel):
         from holmes.plugins.sources.jira import JiraServiceManagementSource  # noqa: F401
         from holmes.plugins.sources.pagerduty import PagerDutySource  # noqa: F401
 
-        TicketSource.model_rebuild()
+        TicketSource.model_rebuild(
+            _types_namespace={
+                "JiraServiceManagementSource": JiraServiceManagementSource,
+                "PagerDutySource": PagerDutySource,
+            }
+        )
         supported_sources = [s.value for s in SupportedTicketSources]
         if source not in supported_sources:
             raise ValueError(

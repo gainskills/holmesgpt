@@ -2,7 +2,6 @@
 
 from unittest.mock import MagicMock
 
-
 from holmes.core.tools import StructuredToolResult, StructuredToolResultStatus
 from holmes.core.tools_utils.token_counting import count_tool_response_tokens
 from holmes.plugins.toolsets.kubernetes_logs import KubernetesLogsToolset

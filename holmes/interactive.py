@@ -52,16 +52,16 @@ from rich.text import Text
 from holmes.common.env_vars import DEFAULT_CLI_USER
 from holmes.config import Config
 from holmes.core.config import config_path_dir
-from holmes.core.init_event import StatusEvent, StatusEventKind, ToolsetStatus
-from holmes.core.toolset_manager import get_prereq_timeout_seconds
 from holmes.core.feedback import (
     PRIVACY_NOTICE_BANNER,
     Feedback,
     FeedbackCallback,
     UserFeedback,
 )
+from holmes.core.init_event import StatusEvent, StatusEventKind, ToolsetStatus
+from holmes.core.llm_usage import RequestStats
+from holmes.core.models import PendingToolApproval, ToolApprovalDecision
 from holmes.core.prompt import PromptComponent, build_initial_ask_messages
-from holmes.core.models import PendingToolApproval
 from holmes.core.tool_calling_llm import (
     ApprovalCallback,
     LLMInterruptedError,
@@ -69,10 +69,8 @@ from holmes.core.tool_calling_llm import (
     ToolCallingLLM,
     ToolCallResult,
 )
-from holmes.core.llm_usage import RequestStats
-from holmes.core.models import ToolApprovalDecision
-from holmes.utils.stream import StreamEvents, StreamMessage
 from holmes.core.tools import pretty_print_toolset_status
+from holmes.core.toolset_manager import get_prereq_timeout_seconds
 from holmes.core.tracing import DummyTracer
 from holmes.plugins.toolsets.bash.common.cli_prefixes import (
     enable_cli_mode,
@@ -80,6 +78,7 @@ from holmes.plugins.toolsets.bash.common.cli_prefixes import (
 from holmes.plugins.toolsets.bash.common.cli_prefixes import (
     save_cli_bash_tools_approved_prefixes as _save_approved_prefixes,
 )
+from holmes.toolset_config_tui import run_toolset_config_tui
 from holmes.utils.colors import (
     AI_COLOR,
     ERROR_COLOR,
@@ -88,9 +87,9 @@ from holmes.utils.colors import (
     TOOLS_COLOR,
     USER_COLOR,
 )
-from holmes.toolset_config_tui import run_toolset_config_tui
 from holmes.utils.console.consts import agent_name
 from holmes.utils.file_utils import write_json_file
+from holmes.utils.stream import StreamEvents, StreamMessage
 from holmes.version import check_version_async
 
 # Display loggers that are silenced in interactive mode.
@@ -182,7 +181,6 @@ class InitProgressRenderer:
     def _build_display(self) -> "Text":
         """Build the Rich renderable for the current state."""
 
-
         now = time.time()
         elapsed = now - self._start_time
         ok = len(self._toolsets_ok)
@@ -247,7 +245,9 @@ class InitProgressRenderer:
         if self._model_message:
             paren = self._model_message.find("(")
             if paren > 0:
-                display.append(f"\n  {self._model_message[:paren].rstrip()}", style="bold")
+                display.append(
+                    f"\n  {self._model_message[:paren].rstrip()}", style="bold"
+                )
                 display.append(f" {self._model_message[paren:]}", style="dim")
             else:
                 display.append(f"\n  {self._model_message}", style="bold")
@@ -464,7 +464,9 @@ class AgenticProgressRenderer:
     _DATA_BUFFER_MAX = 2000  # Max raw lines kept in buffer
     _SCROLL_SPEED = 3  # Lines to advance per tick when idle-scrolling history
 
-    def __init__(self, console: Console, tool_number_offset: int, escape_hint: str = ""):
+    def __init__(
+        self, console: Console, tool_number_offset: int, escape_hint: str = ""
+    ):
         self._console = console
         self._tool_number_offset = tool_number_offset
         self._escape_hint = escape_hint
@@ -522,7 +524,9 @@ class AgenticProgressRenderer:
         data_width = int(tw) - left_width - 7
         return max(40, min(data_width, self._DATA_LINE_MAX))
 
-    def _ingest_output(self, tool_name: str, output: str, description: str = "") -> None:
+    def _ingest_output(
+        self, tool_name: str, output: str, description: str = ""
+    ) -> None:
         """Ingest raw tool output into the scrolling data buffer."""
         # Insert a header line so the data pane shows which tool produced this output
         header = description if description else tool_name
@@ -558,7 +562,6 @@ class AgenticProgressRenderer:
     def _build_data_pane(self) -> "Text":
         """Build the scrolling data feed pane."""
 
-
         pane = Text(no_wrap=True, overflow="ellipsis")
 
         if not self._data_lines:
@@ -582,7 +585,9 @@ class AgenticProgressRenderer:
         pinned_header_idx = -1
         for scan_idx in range(start, -1, -1):
             if self._data_lines[scan_idx].startswith(self._TOOL_HEADER_PREFIX):
-                pinned_header = self._data_lines[scan_idx][len(self._TOOL_HEADER_PREFIX):]
+                pinned_header = self._data_lines[scan_idx][
+                    len(self._TOOL_HEADER_PREFIX) :
+                ]
                 pinned_header_idx = scan_idx
                 break
 
@@ -604,7 +609,7 @@ class AgenticProgressRenderer:
                     # This is the same header we already pinned — skip it
                     continue
                 # New tool section header
-                pinned_header = line[len(self._TOOL_HEADER_PREFIX):]
+                pinned_header = line[len(self._TOOL_HEADER_PREFIX) :]
                 pinned_header_idx = idx
                 pane.append(f" {'':>{gutter_w}} ", style="dim")
                 pane.append(pinned_header, style=f"bold {TOOLS_COLOR}")
@@ -652,7 +657,6 @@ class AgenticProgressRenderer:
     def _build_left_pane(self, show_analyzing: bool = False) -> Any:
         """Build the left-side status pane with separate tasks and tools sections."""
 
-
         now = time.time()
         sections = []
 
@@ -676,7 +680,13 @@ class AgenticProgressRenderer:
 
                 if self._approval_pending:
                     # All tasks dim when waiting for approval
-                    icon = " ☑ " if status == "completed" else " ☒ " if status == "failed" else " ☐ "
+                    icon = (
+                        " ☑ "
+                        if status == "completed"
+                        else " ☒ "
+                        if status == "failed"
+                        else " ☐ "
+                    )
                     tasks_text.append(icon, style="dim")
                     tasks_text.append(task_content, style="dim")
                 elif status == "completed":
@@ -696,10 +706,19 @@ class AgenticProgressRenderer:
             if tasks_text.plain.endswith("\n"):
                 tasks_text.right_crop(1)
             task_border = "dim" if self._approval_pending else "blue"
-            task_title = f"[dim]Tasks {completed}/{total}[/dim]" if self._approval_pending else f"[bold]Tasks[/bold] [dim]{completed}/{total}[/dim]"
+            task_title = (
+                f"[dim]Tasks {completed}/{total}[/dim]"
+                if self._approval_pending
+                else f"[bold]Tasks[/bold] [dim]{completed}/{total}[/dim]"
+            )
             sections.append(
-                Panel(tasks_text, title=task_title,
-                      title_align="left", border_style=task_border, padding=(0, 1))
+                Panel(
+                    tasks_text,
+                    title=task_title,
+                    title_align="left",
+                    border_style=task_border,
+                    padding=(0, 1),
+                )
             )
 
         # --- Tools section ---
@@ -717,7 +736,14 @@ class AgenticProgressRenderer:
             pane_width = min(52, int(term_width) // 2)
             label_budget = max(pane_width - 2 - 2 - 4, 30)
 
-            for name, desc, toolset, elapsed, output_len, is_error in self._tool_history:
+            for (
+                name,
+                desc,
+                toolset,
+                elapsed,
+                output_len,
+                is_error,
+            ) in self._tool_history:
                 tools_text.append("  → ", style="dim")
                 # Build suffix first so we know how much space the label gets
                 suffix = ""
@@ -757,10 +783,19 @@ class AgenticProgressRenderer:
                 tools_text.right_crop(1)
 
             tool_count = len(self._tool_history) + len(self._in_flight)
-            tool_title = f"[dim]Tools {tool_count}[/dim]" if self._approval_pending else f"[bold]Tools[/bold] [dim]{tool_count}[/dim]"
+            tool_title = (
+                f"[dim]Tools {tool_count}[/dim]"
+                if self._approval_pending
+                else f"[bold]Tools[/bold] [dim]{tool_count}[/dim]"
+            )
             sections.append(
-                Panel(tools_text, title=tool_title,
-                      title_align="left", border_style="dim", padding=(0, 1))
+                Panel(
+                    tools_text,
+                    title=tool_title,
+                    title_align="left",
+                    border_style="dim",
+                    padding=(0, 1),
+                )
             )
 
         # Status line: static when approval pending, animated otherwise
@@ -795,7 +830,6 @@ class AgenticProgressRenderer:
     def _build_approval_data_pane(self) -> Any:
         """Build a data pane showing the command awaiting approval."""
 
-
         pane = Text()
         pane.append("\n")
         if self._pending_approval_descriptions:
@@ -808,7 +842,9 @@ class AgenticProgressRenderer:
         return pane
 
     def _build_display(self) -> Any:
-        show_analyzing = self._thinking and not self._in_flight and not self._approval_pending
+        show_analyzing = (
+            self._thinking and not self._in_flight and not self._approval_pending
+        )
         left = self._build_left_pane(show_analyzing=show_analyzing)
 
         # Before any tool output arrives, just show the left pane content
@@ -843,7 +879,13 @@ class AgenticProgressRenderer:
             data_title = f"[bold]Data[/bold]{stats}"
         table.add_row(
             left,
-            Panel(right, title=data_title, title_align="left", border_style=data_border, padding=(0, 0)),
+            Panel(
+                right,
+                title=data_title,
+                title_align="left",
+                border_style=data_border,
+                padding=(0, 0),
+            ),
         )
 
         return table
@@ -859,7 +901,10 @@ class AgenticProgressRenderer:
                     # Scroll logic: modulo-forward through buffer.
                     # When new data arrives (_follow_tail), jump to end.
                     # Otherwise scroll forward from 0, wrapping at end.
-                    if self._data_lines and len(self._data_lines) > self._DATA_PANE_LINES:
+                    if (
+                        self._data_lines
+                        and len(self._data_lines) > self._DATA_PANE_LINES
+                    ):
                         max_start = len(self._data_lines) - self._DATA_PANE_LINES
                         if self._follow_tail:
                             # New data: snap to the end
@@ -979,13 +1024,14 @@ class AgenticProgressRenderer:
             if name == _TODO_WRITE_TOOL_NAME and extra is not None:
                 self._live_tasks = extra
             else:
-                self._tool_history.append((name, desc, toolset, elapsed, output_len or 0, is_error))
+                self._tool_history.append(
+                    (name, desc, toolset, elapsed, output_len or 0, is_error)
+                )
 
         self._completed.clear()
 
     def _print_investigation_summary(self) -> None:
         """Print full task list + tools as a permanent record before the answer."""
-
 
         if self._summary_printed:
             return
@@ -1004,7 +1050,9 @@ class AgenticProgressRenderer:
                 term_width = int(self._console.width or 120)
             except (TypeError, ValueError):
                 term_width = 120
-            for idx, (name, desc, toolset, elapsed, output_len, is_error) in enumerate(self._tool_history):
+            for idx, (name, desc, toolset, elapsed, output_len, is_error) in enumerate(
+                self._tool_history
+            ):
                 tool_num = self._tool_number_offset + idx + 1
                 tools_text.append(f"  {tool_num}. ", style="dim")
                 # Build suffix first so we know how much space the label gets
@@ -1036,11 +1084,18 @@ class AgenticProgressRenderer:
             if tools_text.plain.endswith("\n"):
                 tools_text.right_crop(1)
             tools_text.append("\n")
-            tools_text.append("  /show <number> to view full output", style="dim italic")
+            tools_text.append(
+                "  /show <number> to view full output", style="dim italic"
+            )
             tool_count = len(self._tool_history)
             self._console.print(
-                Panel(tools_text, title=f"[bold]Tools[/bold] [dim]{tool_count}[/dim]",
-                      title_align="left", border_style="dim", padding=(0, 1))
+                Panel(
+                    tools_text,
+                    title=f"[bold]Tools[/bold] [dim]{tool_count}[/dim]",
+                    title_align="left",
+                    border_style="dim",
+                    padding=(0, 1),
+                )
             )
 
         # Print stats line
@@ -1104,7 +1159,16 @@ class AgenticProgressRenderer:
                         break
 
                 self._completed.append(
-                    (tool_number, tool_name, description, toolset_name, elapsed, output_len, is_error, extra)
+                    (
+                        tool_number,
+                        tool_name,
+                        description,
+                        toolset_name,
+                        elapsed,
+                        output_len,
+                        is_error,
+                        extra,
+                    )
                 )
 
                 self._process_completed()
@@ -1133,13 +1197,9 @@ class AgenticProgressRenderer:
                 reasoning = event.data.get("reasoning")
                 content = event.data.get("content")
                 if reasoning:
-                    self._console.print(
-                        f"  [italic dim]{reasoning}[/italic dim]"
-                    )
+                    self._console.print(f"  [italic dim]{reasoning}[/italic dim]")
                 if content and content.strip():
-                    self._console.print(
-                        f"  [dim]{content}[/dim]"
-                    )
+                    self._console.print(f"  [dim]{content}[/dim]")
 
                 # Ensure live display is running for subsequent tool events
                 if self._live is None:
@@ -1345,7 +1405,9 @@ def _show_sample_questions_menu(console: Console) -> Optional[str]:
         padding=(0, 1),
     )
 
-    result = _run_inline_menu(options, console, header=header, default_index=default_index)
+    result = _run_inline_menu(
+        options, console, header=header, default_index=default_index
+    )
 
     if result is None or result == default_index:
         return None
@@ -2267,9 +2329,7 @@ def _wait_for_completion_or_escape(
                 ch = sys.stdin.read(1)
                 if ch == "\x1b":
                     # Disambiguate standalone Escape from escape sequences (arrow keys etc.)
-                    ready2, _, _ = select_module.select(
-                        [sys.stdin], [], [], 0.1
-                    )
+                    ready2, _, _ = select_module.select([sys.stdin], [], [], 0.1)
                     if ready2:
                         # Part of an escape sequence — consume all remaining bytes
                         # (e.g. \x1b[A is 2 more bytes, \x1b[1;5A is more)
@@ -2334,11 +2394,14 @@ def run_interactive_loop(
     # default: interactive approval handler
     approval_callback: Optional[ApprovalCallback] = None
     if bash_always_allow:
-        def _always_allow(_: Any) -> tuple[bool, Optional[str]]:
-            return (True, None)
+        def approve_tool(
+            pending_approval: PendingToolApproval,
+        ) -> tuple[bool, Optional[str]]:
+            return True, None
 
-        approval_callback = _always_allow
+        approval_callback = approve_tool
     elif not bash_always_deny:
+
         def approval_handler(
             pending_approval: PendingToolApproval,
         ) -> tuple[bool, Optional[str]]:
@@ -2449,7 +2512,9 @@ def run_interactive_loop(
 
     welcome_banner = WELCOME_BANNER
     if feedback_callback:
-        welcome_banner += f", [bold]{SlashCommands.FEEDBACK.command}[/bold] for feedback"
+        welcome_banner += (
+            f", [bold]{SlashCommands.FEEDBACK.command}[/bold] for feedback"
+        )
     console.print(welcome_banner)
 
     if not initial_user_input:
@@ -2622,7 +2687,7 @@ def run_interactive_loop(
             # the decisions.  This avoids terminal conflicts between Rich Live
             # (main thread) and prompt_toolkit (also needs the main thread).
             approval_pending_event = threading.Event()  # bg → main: "I need approval"
-            approval_done_event = threading.Event()     # main → bg: "decisions ready"
+            approval_done_event = threading.Event()  # main → bg: "decisions ready"
             approval_data: List[Optional[List[dict]]] = [None]  # pending_approvals list
             approval_decisions: List[Optional[List["ToolApprovalDecision"]]] = [None]
 
@@ -2671,11 +2736,16 @@ def run_interactive_loop(
                                 _event_queue.put(event)
                                 if event.event == StreamEvents.TOOL_RESULT:
                                     _tool_number_offset += 1
-                                if event.event in (StreamEvents.ANSWER_END, StreamEvents.APPROVAL_REQUIRED):
+                                if event.event in (
+                                    StreamEvents.ANSWER_END,
+                                    StreamEvents.APPROVAL_REQUIRED,
+                                ):
                                     break
 
                             if last_event is None:
-                                raise Exception("Stream ended without yielding any events")
+                                raise Exception(
+                                    "Stream ended without yielding any events"
+                                )
 
                             # Check if we got an approval-required event
                             if last_event.event == StreamEvents.APPROVAL_REQUIRED:
@@ -2684,7 +2754,9 @@ def run_interactive_loop(
                                 # call_stream returns absolute iteration count;
                                 # carry it forward so the next call_stream
                                 # enforces the global max_steps limit.
-                                _iteration_offset = td.get("num_llm_calls", _iteration_offset)
+                                _iteration_offset = td.get(
+                                    "num_llm_calls", _iteration_offset
+                                )
                                 # Hand off to main thread for interactive prompt
                                 approval_data[0] = td["pending_approvals"]
                                 approval_done_event.clear()
@@ -2706,7 +2778,9 @@ def run_interactive_loop(
                 # Copy context so Braintrust's current_span ContextVar propagates to the thread,
                 # otherwise ChatCompletionWrapper spans won't nest under the trace span.
                 ctx = contextvars.copy_context()
-                ai_thread = threading.Thread(target=ctx.run, args=(_run_ai_stream,), daemon=True)
+                ai_thread = threading.Thread(
+                    target=ctx.run, args=(_run_ai_stream,), daemon=True
+                )
                 ai_thread.start()
 
                 # Start escape listener in a background thread so the main
@@ -2720,7 +2794,9 @@ def run_interactive_loop(
                 escape_thread.start()
 
                 # --- Main thread: render stream events while monitoring for escape ---
-                progress = AgenticProgressRenderer(console, tool_number_offset, escape_hint)
+                progress = AgenticProgressRenderer(
+                    console, tool_number_offset, escape_hint
+                )
                 progress.start()
                 all_tool_calls_this_turn: list[dict] = []
                 terminal_data = None
@@ -2744,13 +2820,17 @@ def run_interactive_loop(
 
                     # Render the event
                     progress.handle_event(
-                        event, all_tool_calls_this_turn, all_tool_calls_history,
+                        event,
+                        all_tool_calls_this_turn,
+                        all_tool_calls_history,
                     )
 
                     if event.event == StreamEvents.ANSWER_END:
                         terminal_data = event.data
                         total_num_llm_calls = terminal_data.get("num_llm_calls", 0)
-                        accumulated_stats += RequestStats(**terminal_data.get("costs", {}))
+                        accumulated_stats += RequestStats(
+                            **terminal_data.get("costs", {})
+                        )
                     elif event.event == StreamEvents.APPROVAL_REQUIRED:
                         # Accumulate stats from the pre-approval segment
                         # (num_llm_calls is absolute, so assign not accumulate)

@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from pydantic import BaseModel, Field, model_validator
+
 from holmes.utils.header_rendering import render_env_template
 
 logger = logging.getLogger(__name__)
@@ -91,7 +92,9 @@ def exchange_code_for_tokens(
             timeout=30,
         )
     except httpx.HTTPError as e:
-        raise OAuthTokenExchangeError(0, f"Token request to {token_url} failed: {e}") from e
+        raise OAuthTokenExchangeError(
+            0, f"Token request to {token_url} failed: {e}"
+        ) from e
 
     # Retry with client_secret in POST body if Basic Auth failed, OR if the IdP
     # returned 200 with a non-token body (e.g. Slack responds HTTP 200 +
@@ -113,7 +116,9 @@ def exchange_code_for_tokens(
                 timeout=30,
             )
         except httpx.HTTPError as e:
-            raise OAuthTokenExchangeError(0, f"Token request to {token_url} failed: {e}") from e
+            raise OAuthTokenExchangeError(
+                0, f"Token request to {token_url} failed: {e}"
+            ) from e
 
     if not resp.is_success:
         detail = resp.text[:300] if resp.text else "Unknown error"
@@ -122,10 +127,15 @@ def exchange_code_for_tokens(
     try:
         token_data = resp.json()
     except (ValueError, json.JSONDecodeError) as e:
-        raise OAuthTokenExchangeError(resp.status_code, f"Invalid JSON in token response: {e}") from e
+        raise OAuthTokenExchangeError(
+            resp.status_code, f"Invalid JSON in token response: {e}"
+        ) from e
 
     if "access_token" not in token_data:
-        raise OAuthTokenExchangeError(resp.status_code, f"Response missing 'access_token'. Keys: {list(token_data.keys())}")
+        raise OAuthTokenExchangeError(
+            resp.status_code,
+            f"Response missing 'access_token'. Keys: {list(token_data.keys())}",
+        )
 
     return token_data
 
@@ -175,7 +185,9 @@ class MCPOAuthConfig(BaseModel):
     @model_validator(mode="after")
     def auto_enable_when_configured(self):
         """Auto-enable OAuth when any endpoint or client_id is explicitly set."""
-        if not self.enabled and (self.authorization_url or self.token_url or self.client_id):
+        if not self.enabled and (
+            self.authorization_url or self.token_url or self.client_id
+        ):
             self.enabled = True
         return self
 
@@ -187,8 +199,19 @@ class MCPOAuthConfig(BaseModel):
         environment variables (typically injected from a Kubernetes Secret) —
         same Jinja syntax the headers code path already supports.
         """
-        for field in ("client_secret", "authorization_url", "token_url", "client_id", "registration_endpoint", "resource"):
-            setattr(self, field, render_env_template(getattr(self, field), f"MCPOAuthConfig.{field}"))
+        for field in (
+            "client_secret",
+            "authorization_url",
+            "token_url",
+            "client_id",
+            "registration_endpoint",
+            "resource",
+        ):
+            setattr(
+                self,
+                field,
+                render_env_template(getattr(self, field), f"MCPOAuthConfig.{field}"),
+            )
         return self
 
 
@@ -207,7 +230,9 @@ class OAuthDecisionCode(BaseModel):
     resource: Optional[str] = None
 
 
-def parse_oauth_decision(decision: Optional[Dict[str, Any]]) -> Optional[OAuthDecisionCode]:
+def parse_oauth_decision(
+    decision: Optional[Dict[str, Any]],
+) -> Optional[OAuthDecisionCode]:
     """Try to parse a tool approval decision as an OAuth code exchange.
 
     Returns the parsed OAuthDecisionCode if valid, None otherwise.
@@ -289,7 +314,9 @@ class OAuthExchangeManager:
             pending = self._pending.pop(tool_call_id, None)
 
         if pending is None:
-            logger.error("OAuth exchange: no pending exchange for tool_call_id=%s", tool_call_id)
+            logger.error(
+                "OAuth exchange: no pending exchange for tool_call_id=%s", tool_call_id
+            )
             return
 
         # Frontend may include client_id and client_secret from DCR
@@ -322,7 +349,11 @@ class OAuthExchangeManager:
                 resource=effective_resource,
             )
         except (OAuthTokenExchangeError, KeyError, Exception):
-            logger.exception("OAuth exchange failed (tool_call_id=%s, token_url=%s)", tool_call_id, pending.oauth_config.token_url)
+            logger.exception(
+                "OAuth exchange failed (tool_call_id=%s, token_url=%s)",
+                tool_call_id,
+                pending.oauth_config.token_url,
+            )
             return
 
         # Record the resource the token was actually issued for, so cache and
@@ -332,12 +363,15 @@ class OAuthExchangeManager:
 
         if token_manager is None:
             from holmes.core.oauth_utils import _get_token_manager
+
             token_manager = _get_token_manager()
 
         token_manager.store_token(pending.oauth_config, token_data, request_context)
         logger.info(
             "OAuth token stored (idp=%s, expires_in=%s, has_refresh=%s)",
-            pending.oauth_config.token_url, token_data.get("expires_in"), "refresh_token" in token_data,
+            pending.oauth_config.token_url,
+            token_data.get("expires_in"),
+            "refresh_token" in token_data,
         )
 
 

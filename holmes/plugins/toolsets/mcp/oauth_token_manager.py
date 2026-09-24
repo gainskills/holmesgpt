@@ -25,7 +25,9 @@ from holmes.plugins.toolsets.mcp.oauth_token_store import (
 logger = logging.getLogger(__name__)
 
 # Background sweep interval and lookahead window (configurable via env vars)
-OAUTH_CREDENTIAL_INTERVAL_SECONDS = int(os.environ.get("OAUTH_CREDENTIAL_INTERVAL_SECONDS", "3600"))
+OAUTH_CREDENTIAL_INTERVAL_SECONDS = int(
+    os.environ.get("OAUTH_CREDENTIAL_INTERVAL_SECONDS", "3600")
+)
 OAUTH_REFRESH_AHEAD_SECONDS = int(os.environ.get("OAUTH_REFRESH_AHEAD_SECONDS", "3600"))
 
 
@@ -104,7 +106,9 @@ class OAuthTokenManager:
             if token_expiry_str:
                 try:
                     token_expiry = datetime.fromisoformat(token_expiry_str)
-                    remaining = (token_expiry - datetime.now(timezone.utc)).total_seconds()
+                    remaining = (
+                        token_expiry - datetime.now(timezone.utc)
+                    ).total_seconds()
                     expires_in = max(int(remaining), 1)
                 except (ValueError, TypeError):
                     pass
@@ -162,7 +166,8 @@ class OAuthTokenManager:
                 return cached
             logger.warning(
                 "OAuthTokenManager: cached token was issued for resource %r, not %r — refusing cross-resource reuse, attempting refresh",
-                cached_resource, requested_resource,
+                cached_resource,
+                requested_resource,
             )
 
         # 2. Try refresh (mints an audience-correct token when the cached one was
@@ -181,13 +186,16 @@ class OAuthTokenManager:
             if not self._resource_compatible(stored_resource, requested_resource):
                 logger.warning(
                     "OAuthTokenManager: stored token was issued for resource %r, not %r — refusing cross-resource reuse",
-                    stored_resource, requested_resource,
+                    stored_resource,
+                    requested_resource,
                 )
                 return None
             self._cache.set(
                 cache_key,
                 stored_token["access_token"],
-                expires_in=stored_token.get("_remaining_ttl", stored_token.get("expires_in", 300)),
+                expires_in=stored_token.get(
+                    "_remaining_ttl", stored_token.get("expires_in", 300)
+                ),
                 refresh_token=stored_token.get("refresh_token"),
                 refresh_expires_in=stored_token.get("refresh_expires_in"),
                 token_url=stored_token.get("token_url", getattr(oauth_config, "token_url", None)),
@@ -202,7 +210,9 @@ class OAuthTokenManager:
         return None
 
     @staticmethod
-    def _resource_compatible(token_resource: Optional[str], requested_resource: Optional[str]) -> bool:
+    def _resource_compatible(
+        token_resource: Optional[str], requested_resource: Optional[str]
+    ) -> bool:
         """RFC 8707 audience check for serving a token.
 
         A token may be served when either side doesn't specify a resource —
@@ -239,7 +249,9 @@ class OAuthTokenManager:
         """Store a token to cache and persistent store."""
         user_id = _get_user_id(request_context)
         if not user_id:
-            logger.warning("OAuthTokenManager: refusing to store token without a user_id")
+            logger.warning(
+                "OAuthTokenManager: refusing to store token without a user_id"
+            )
             return
 
         provider_id = self._get_provider_id(oauth_config, disk_key)
@@ -280,14 +292,18 @@ class OAuthTokenManager:
 
         logger.debug(
             "OAuthTokenManager: token stored (cache_key=%s, expires_in=%s, has_refresh=%s)",
-            cache_key, expires_in, "refresh_token" in token_data,
+            cache_key,
+            expires_in,
+            "refresh_token" in token_data,
         )
 
     def require_user_id(self, request_context: Optional[Dict[str, Any]]) -> str:
         """Return the user_id from request_context, or DEFAULT_CLUSTER_USER if absent."""
         user_id = _get_user_id(request_context)
         if not user_id:
-            raise ValueError("OAuthTokenManager: user_id is required in request_context")
+            raise ValueError(
+                "OAuthTokenManager: user_id is required in request_context"
+            )
         return user_id
 
     def shutdown(self) -> None:
@@ -301,7 +317,9 @@ class OAuthTokenManager:
     def cache(self) -> OAuthTokenCache:
         return self._cache
 
-    def get_cache_key(self, oauth_config: Any, request_context: Optional[Dict[str, Any]] = None) -> str:
+    def get_cache_key(
+        self, oauth_config: Any, request_context: Optional[Dict[str, Any]] = None
+    ) -> str:
         """Public accessor for the cache key."""
         return self._get_cache_key(oauth_config, request_context)
 
@@ -337,19 +355,33 @@ class OAuthTokenManager:
         if not expiring:
             return
 
-        logger.debug("OAuthTokenManager: found %d tokens expiring within %ds", len(expiring), OAUTH_REFRESH_AHEAD_SECONDS)
+        logger.debug(
+            "OAuthTokenManager: found %d tokens expiring within %ds",
+            len(expiring),
+            OAUTH_REFRESH_AHEAD_SECONDS,
+        )
 
         for cache_key, entry in expiring:
             try:
                 self._refresh_single_token(cache_key, entry)
             except Exception:
-                logger.warning("OAuthTokenManager: refresh failed for cache_key=%s", cache_key, exc_info=True)
+                logger.warning(
+                    "OAuthTokenManager: refresh failed for cache_key=%s",
+                    cache_key,
+                    exc_info=True,
+                )
 
     def _refresh_single_token(self, cache_key: str, entry: Any) -> None:
         """Refresh a single expiring token and push to persistent store."""
         refresh_token = entry.refresh_token
         if refresh_token and entry.token_url:
-            result = self._do_refresh_request(entry.token_url, entry.client_id, refresh_token, cache_key, resource=entry.resource)
+            result = self._do_refresh_request(
+                entry.token_url,
+                entry.client_id,
+                refresh_token,
+                cache_key,
+                resource=entry.resource,
+            )
             if result:
                 token_data, _access_token, _expires_in = result
                 if self._store:
@@ -361,7 +393,9 @@ class OAuthTokenManager:
                         client_id=entry.client_id,
                         resource=entry.resource,
                     )
-                logger.info("OAuthTokenManager: sweep refreshed token (cache_key=%s)", cache_key)
+                logger.info(
+                    "OAuthTokenManager: sweep refreshed token (cache_key=%s)", cache_key
+                )
                 return
 
         # No refresh token or refresh failed — try reloading from store
@@ -382,11 +416,16 @@ class OAuthTokenManager:
                 user_id=entry.user_id,
                 resource=stored.get("resource", entry.resource),
             )
-            logger.info("OAuthTokenManager: sweep reloaded token from store (cache_key=%s)", cache_key)
+            logger.info(
+                "OAuthTokenManager: sweep reloaded token from store (cache_key=%s)",
+                cache_key,
+            )
 
     # ── Synchronous (reactive) refresh ─────────────────────────────────
 
-    def _refresh_token(self, cache_key: str, oauth_config: Any, user_id: Optional[str] = None) -> Optional[str]:
+    def _refresh_token(
+        self, cache_key: str, oauth_config: Any, user_id: Optional[str] = None
+    ) -> Optional[str]:
         """Attempt to refresh an expired access token using the cached refresh token."""
         refresh_token = self._cache.get_refresh_token(cache_key)
         if not refresh_token:
@@ -408,7 +447,10 @@ class OAuthTokenManager:
 
         try:
             result = self._do_refresh_request(
-                oauth_config.token_url, oauth_config.client_id, refresh_token, cache_key,
+                oauth_config.token_url,
+                oauth_config.client_id,
+                refresh_token,
+                cache_key,
                 resource=resource,
             )
             if not result:
@@ -428,12 +470,20 @@ class OAuthTokenManager:
                 )
             return access_token
         except Exception:
-            logger.warning("OAuthTokenManager: refresh failed (cache_key=%s)", cache_key, exc_info=True)
+            logger.warning(
+                "OAuthTokenManager: refresh failed (cache_key=%s)",
+                cache_key,
+                exc_info=True,
+            )
             self._cache.evict(cache_key)
             return None
 
     def _do_refresh_request(
-        self, token_url: str, client_id: Optional[str], refresh_token: str, cache_key: str,
+        self,
+        token_url: str,
+        client_id: Optional[str],
+        refresh_token: str,
+        cache_key: str,
         resource: Optional[str] = None,
     ) -> Optional[Tuple[Dict[str, Any], str, int]]:
         """POST to token endpoint, validate response, update cache.
@@ -443,7 +493,11 @@ class OAuthTokenManager:
 
         Returns (token_data, access_token, expires_in) on success, None on failure.
         """
-        logger.debug("OAuthTokenManager: refreshing token at %s (cache_key=%s)", token_url, cache_key)
+        logger.debug(
+            "OAuthTokenManager: refreshing token at %s (cache_key=%s)",
+            token_url,
+            cache_key,
+        )
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -458,13 +512,20 @@ class OAuthTokenManager:
             timeout=30,
         )
         if response.status_code != 200:
-            logger.warning("OAuthTokenManager: refresh HTTP %d (cache_key=%s)", response.status_code, cache_key)
+            logger.warning(
+                "OAuthTokenManager: refresh HTTP %d (cache_key=%s)",
+                response.status_code,
+                cache_key,
+            )
             return None
 
         token_data = response.json()
         access_token = token_data.get("access_token")
         if not access_token:
-            logger.warning("OAuthTokenManager: refresh response missing access_token (cache_key=%s)", cache_key)
+            logger.warning(
+                "OAuthTokenManager: refresh response missing access_token (cache_key=%s)",
+                cache_key,
+            )
             return None
 
         expires_in = token_data.get("expires_in", 300)
@@ -476,7 +537,11 @@ class OAuthTokenManager:
             refresh_expires_in=token_data.get("refresh_expires_in"),
             resource=resource,
         )
-        logger.debug("OAuthTokenManager: token refreshed (cache_key=%s, expires_in=%s)", cache_key, expires_in)
+        logger.debug(
+            "OAuthTokenManager: token refreshed (cache_key=%s, expires_in=%s)",
+            cache_key,
+            expires_in,
+        )
         return token_data, access_token, expires_in
 
     # ── Key helpers ────────────────────────────────────────────────────
@@ -522,5 +587,3 @@ def _get_user_id(request_context: Optional[Dict[str, Any]]) -> str:
     if request_context and request_context.get("user_id"):
         return request_context["user_id"]
     return DEFAULT_CLUSTER_USER
-
-

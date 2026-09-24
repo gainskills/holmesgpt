@@ -1,4 +1,3 @@
-
 from holmes.config import Config
 
 
