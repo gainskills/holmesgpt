@@ -27,6 +27,7 @@ from holmes.plugins.toolsets.bash.common.default_lists import (
     CORE_ALLOW_LIST,
     DEFAULT_DENY_LIST,
     EXTENDED_ALLOW_LIST,
+)
 from holmes.plugins.toolsets.bash.shell_parser import (
     ParsedCommand,
     ShellParseError,

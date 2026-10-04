@@ -11,7 +11,6 @@ from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, TextIO, Tuple, Type, Union
 
 import httpx
-import httpx2
 from mcp.client.session import ClientSession
 from mcp.client.sse import sse_client
 from mcp.client.stdio import StdioServerParameters, stdio_client
@@ -81,25 +80,25 @@ _locks_lock = threading.Lock()
 
 
 def create_mcp_http_client_factory(verify_ssl: bool = True):
-    """Create a factory function for httpx2 clients with configurable SSL verification."""
+    """Create a factory function for httpx clients with configurable SSL verification."""
 
     def factory(
         headers: Dict[str, str] | None = None,
-        timeout: httpx2.Timeout | None = None,
-        auth: httpx2.Auth | None = None,
-    ) -> httpx2.AsyncClient:
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
         kwargs: Dict[str, Any] = {
             "verify": verify_ssl,
         }
         if timeout is None:
-            kwargs["timeout"] = httpx2.Timeout(SSE_READ_TIMEOUT)
+            kwargs["timeout"] = httpx.Timeout(SSE_READ_TIMEOUT)
         else:
             kwargs["timeout"] = timeout
         if headers is not None:
             kwargs["headers"] = headers
         if auth is not None:
             kwargs["auth"] = auth
-        return httpx2.AsyncClient(**kwargs)
+        return httpx.AsyncClient(**kwargs)
 
     return factory
 
@@ -115,11 +114,11 @@ async def _streamable_http_client_compat(url: str, *args: Any, **kwargs: Any):
         factory = kwargs.get("httpx_client_factory")
         read_timeout = kwargs.get("sse_read_timeout", MCP_TOOL_CALL_TIMEOUT_SEC)
         if factory:
-            client = factory(headers=headers, timeout=httpx2.Timeout(read_timeout, read=SSE_READ_TIMEOUT))
+            client = factory(headers=headers, timeout=httpx.Timeout(read_timeout, read=SSE_READ_TIMEOUT))
         else:
-            client = httpx2.AsyncClient(
+            client = httpx.AsyncClient(
                 headers=headers,
-                timeout=httpx2.Timeout(read_timeout, read=SSE_READ_TIMEOUT),
+                timeout=httpx.Timeout(read_timeout, read=SSE_READ_TIMEOUT),
             )
         async with client:
             async with streamable_http_client(url, http_client=client) as streams:
