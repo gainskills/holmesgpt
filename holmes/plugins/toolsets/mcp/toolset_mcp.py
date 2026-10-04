@@ -7,6 +7,7 @@ import os
 import re
 import threading
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from enum import Enum
 from typing import Any, ClassVar, Dict, List, Optional, TextIO, Tuple, Type, Union
 
@@ -321,6 +322,7 @@ async def get_initialized_mcp_session(
     if toolset._mcp_config is None:
         raise ValueError("MCP config is not initialized")
 
+    timeout_delta = timedelta(seconds=float(MCP_TOOL_CALL_TIMEOUT_SEC))
     timeout_sec = float(MCP_TOOL_CALL_TIMEOUT_SEC)
 
     if isinstance(toolset._mcp_config, StdioMCPConfig):
@@ -336,7 +338,7 @@ async def get_initialized_mcp_session(
                 async with ClientSession(
                     read_stream,
                     write_stream,
-                    read_timeout_seconds=timeout_sec,
+                    read_timeout_seconds=timeout_delta,
                 ) as session:
                     _ = await session.initialize()
                     yield session
@@ -356,7 +358,7 @@ async def get_initialized_mcp_session(
             async with ClientSession(
                 read_stream,
                 write_stream,
-                read_timeout_seconds=timeout_sec,
+                read_timeout_seconds=timeout_delta,
             ) as session:
                 _ = await session.initialize()
                 yield session
@@ -367,14 +369,14 @@ async def get_initialized_mcp_session(
         async with streamablehttp_client(
             url,
             headers=rendered_headers,
-            sse_read_timeout=MCP_TOOL_CALL_TIMEOUT_SEC,
+            sse_read_timeout=timeout_sec,
             httpx_client_factory=httpx_factory,
         ) as streams:
             read_stream, write_stream = streams[0], streams[1]
             async with ClientSession(
                 read_stream,
                 write_stream,
-                read_timeout_seconds=timeout_sec,
+                read_timeout_seconds=timeout_delta,
             ) as session:
                 _ = await session.initialize()
                 yield session

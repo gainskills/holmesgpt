@@ -1269,7 +1269,7 @@ class TestRendererEndToEnd(unittest.TestCase):
     def test_error_tool_shows_token_count(self):
         """Error tools with output should show both token count and (error)."""
         console = Console(
-            width=120, force_terminal=True, color_system=None, file=StringIO()
+            width=120, height=40, force_terminal=True, color_system=None, file=StringIO()
         )
         renderer = AgenticProgressRenderer(console, tool_number_offset=0)
         all_tool_calls = []
@@ -1738,7 +1738,8 @@ class TestRendererEndToEnd(unittest.TestCase):
     def _render_to_text(self, renderer):
         """Render the display to plain text using a recording console."""
         capture = Console(
-            width=100,
+            width=renderer._console.width or 100,
+            height=40,
             record=True,
             force_terminal=True,
             color_system=None,
